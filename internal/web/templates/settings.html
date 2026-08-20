@@ -1,0 +1,95 @@
+{{define "content"}}
+
+{{if .Data.PasswordChangeRequired}}
+<p class="banner banner-warn">
+  Still using the default <code>doot</code> / <code>doot</code> credentials.
+  Change them below.
+</p>
+{{end}}
+
+<form class="card stack" hx-post="/settings/config" hx-target="#config-status" hx-swap="outerHTML">
+  <input type="hidden" name="_config_form" value="1">
+  {{range .Data.Groups}}
+    <fieldset class="group">
+      <legend>{{.Name}}</legend>
+      {{range .Fields}}
+        <div class="field">
+          {{if eq .Kind "bool"}}
+            <label class="switch">
+              <input type="checkbox" name="{{.Key}}" value="true" {{if .Checked}}checked{{end}}>
+              <span>{{.Label}}</span>
+            </label>
+          {{else}}
+            <label for="{{.Key}}">{{.Label}}</label>
+            {{if eq .Kind "textarea"}}
+              <textarea id="{{.Key}}" name="{{.Key}}" rows="10" spellcheck="false">{{.Value}}</textarea>
+            {{else if eq .Kind "int"}}
+              <input id="{{.Key}}" name="{{.Key}}" type="number" inputmode="numeric" value="{{.Value}}">
+            {{else}}
+              <input id="{{.Key}}" name="{{.Key}}" type="text" value="{{.Value}}"
+                     autocapitalize="none" autocorrect="off" spellcheck="false">
+            {{end}}
+          {{end}}
+          {{if .Help}}<p class="help">{{.Help}}</p>{{end}}
+        </div>
+      {{end}}
+    </fieldset>
+  {{end}}
+
+  <p id="config-status" class="status-idle">Unsaved changes are not kept.</p>
+  <button type="submit" class="btn btn-primary">Save configuration</button>
+</form>
+
+<section class="card">
+  <h2>Secrets</h2>
+  <p class="muted">
+    Environment variables, set with <code>fly secrets set</code>. Values are
+    never shown or editable here — the process refuses to start without them.
+  </p>
+  <ul class="secrets">
+    {{range .Data.Secrets}}
+      <li>
+        <code>{{.Name}}</code>
+        {{if .Present}}<span class="pill pill-ok">set</span>
+        {{else}}<span class="pill pill-err">missing</span>{{end}}
+        <span class="help">{{.Purpose}}</span>
+      </li>
+    {{end}}
+  </ul>
+</section>
+
+<form class="card stack" method="post" action="/settings/credentials">
+  <h2>Credentials</h2>
+
+  <div class="field">
+    <label for="cred-username">Username</label>
+    <input id="cred-username" name="username" type="text" value="{{.Data.Username}}"
+           autocomplete="username" autocapitalize="none" autocorrect="off" required>
+  </div>
+
+  <div class="field">
+    <label for="cred-password">New password</label>
+    <input id="cred-password" name="password" type="password" autocomplete="new-password">
+    <p class="help">Leave blank to keep your current password.</p>
+  </div>
+
+  <div class="field">
+    <label for="cred-confirm">Confirm new password</label>
+    <input id="cred-confirm" name="password_confirm" type="password" autocomplete="new-password">
+  </div>
+
+  <button type="submit" class="btn">Update credentials</button>
+</form>
+
+<section class="card">
+  <h2>Session</h2>
+  <p class="muted">
+    Sessions last {{.Data.SessionDays}} days. Rotating <code>SESSION_SECRET</code>
+    signs you out everywhere.
+  </p>
+  <form method="post" action="/logout">
+    <button type="submit" class="btn btn-danger">Sign out</button>
+  </form>
+</section>
+
+{{end}}

@@ -1,0 +1,10 @@
+# Build output
+/doot
+/out/
+
+# Local environment
+.env
+.env.local
+
+# Editor / OS noise
+.DS_Store

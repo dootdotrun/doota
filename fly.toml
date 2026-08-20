@@ -1,0 +1,43 @@
+# doot-ai — one machine, always on.
+#
+# Set the app name and region to suit, then:
+#   fly secrets set NEON_CONNECTION_STRING=... SESSION_SECRET=... \
+#     LLM_API_KEY=... LLM_API_ENDPOINT=... LLM_MODEL=... SPRITE_TOKEN=... \
+#     GITHUB_TOKEN=...
+#   fly deploy
+#
+# GITHUB_TOKEN is a scoped personal access token with repo scope. It is the only
+# GitHub credential: clone, fetch, and push use it inside the sandbox through a
+# credential-store file, and pull requests use it against api.github.com.
+
+app = "doot-ai"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # Both settings are load-bearing. Fly's default scale-to-zero would suspend
+  # the machine mid-goal; the agent runner has to stay alive. Exactly one
+  # machine: the run lease exists to survive deploy overlap, not to scale out.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "4s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/healthz"
+
+[[vm]]
+  # The app is a thin coordinator: the heavy work happens inside Sprites and all
+  # state lives in Neon.
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
+
+# No [mounts]. The machine is stateless by design - nothing on its disk matters.

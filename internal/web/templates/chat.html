@@ -1,0 +1,58 @@
+{{define "content"}}
+
+{{if .Data.Run}}
+<div id="agent-bar" class="agent-bar{{if eq .Data.Run.State "idle"}} hidden{{end}}">
+  {{if eq .Data.Run.State "running"}}<span class="spinner" aria-hidden="true"></span>{{end}}
+  <span id="agent-state">{{.Data.Run.State}} · step {{.Data.Run.StepCount}}{{if .Data.Run.AwaitingReason.Valid}} · {{.Data.Run.AwaitingReason.String}}{{end}}{{if .Data.AwaitingDetail}} · {{.Data.AwaitingDetail}}{{end}}</span>
+  {{if eq .Data.Run.State "running"}}
+    <form method="post" action="/chat/pause" class="agent-bar-stop">
+      <button type="submit" class="btn btn-small btn-danger">{{if .Data.Run.PauseRequested}}Force stop{{else}}Pause{{end}}</button>
+    </form>
+  {{else if eq .Data.Run.State "paused"}}
+    <form method="post" action="/chat/resume" class="agent-bar-stop">
+      <button type="submit" class="btn btn-small">Resume</button>
+    </form>
+  {{else if and (eq .Data.Run.State "awaiting_human") (ne .Data.Run.AwaitingReason.String "question") (ne .Data.Run.AwaitingReason.String "plan_approval")}}
+    <form method="post" action="/chat/resume" class="agent-bar-stop">
+      <button type="submit" class="btn btn-small">Resume</button>
+    </form>
+  {{end}}
+</div>
+{{if and (eq .Data.Run.State "awaiting_human") .Data.AwaitingError}}
+<section class="card awaiting-card awaiting-{{.Data.Run.AwaitingReason.String}}">
+  <h2>Work needs attention</h2>
+  <p>{{.Data.AwaitingError}}</p>
+  {{if .Data.AwaitingDetail}}<p class="help">{{.Data.AwaitingDetail}}</p>{{end}}
+</section>
+{{end}}
+{{else}}
+<div id="agent-bar" class="agent-bar hidden"><span class="spinner" aria-hidden="true"></span><span id="agent-state">working</span></div>
+{{end}}
+
+{{if .Data.Blocked}}<p class="banner banner-warn">{{.Data.Blocked}}</p>{{end}}
+
+<div id="transcript" class="transcript" data-last-message-id="{{.Data.LastMessageID}}" data-busy="{{if .Data.Busy}}1{{else}}0{{end}}">
+  {{if .Data.Messages}}
+    {{template "messages.html" .Data.Messages}}
+  {{else}}
+    <div class="card">
+      <p class="phase-tag">Phase 6</p>
+      <h2>Say something</h2>
+      <p class="muted">Ask about the code or ask for a change. Work is persisted, so a deploy resumes it from the same point.</p>
+      <p class="help">You can pause work, safely redeploy, and answer a focused question when doot needs a decision.</p>
+    </div>
+  {{end}}
+</div>
+
+<div id="streaming" class="turn assistant hidden"><div class="bubble" id="streaming-text"></div></div>
+
+<form id="composer" class="composer" method="post" action="/chat">
+  <textarea id="composer-input" name="message" rows="1" placeholder="{{if and .Data.Run (eq .Data.Run.State "awaiting_human") (eq .Data.Run.AwaitingReason.String "question")}}Reply to continue…{{else}}Message doot…{{end}}"
+            autocapitalize="sentences" autocorrect="on" spellcheck="true" {{if not .Data.CanSend}}disabled{{end}}></textarea>
+  <button type="submit" class="send" aria-label="Send" {{if not .Data.CanSend}}disabled{{end}}>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4M5 11l7-7 7 7"/></svg>
+  </button>
+</form>
+
+<p class="chat-foot help">{{.Data.Model}}</p>
+{{end}}

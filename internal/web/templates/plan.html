@@ -1,0 +1,42 @@
+{{define "content"}}
+{{if not .Data.Project}}
+  <section class="card"><p class="phase-tag">Board</p><h2>Create a project first</h2><p class="muted">The task board belongs to the single project and its <code>doot</code> branch.</p></section>
+{{else if .Data.Empty}}
+  <section class="card">
+    <p class="phase-tag">Board</p><h2>Nothing planned</h2>
+    <p class="muted">Ask doot for a plan in Chat and it will draft one here before touching the repository.</p>
+    {{if .Data.Feedback}}<p class="banner banner-warn">You asked for a revision: {{.Data.Feedback}}</p>{{end}}
+  </section>
+{{else}}
+  <section id="plan-content" class="card plan-card">
+    <p class="phase-tag">{{.Data.Status}}</p>
+    <h2>{{.Data.Title}}</h2>
+    {{if .Data.BaseCommit}}<p class="help">Measured from <code>{{shortID .Data.BaseCommit}}</code>{{if .Data.DiffURL}} · <a href="{{.Data.DiffURL}}">View the diff</a>{{end}}</p>{{end}}
+  </section>
+
+  <section class="card">
+    <ul class="task-board">
+    {{range .Data.Tasks}}
+      <li class="task task-{{.Status}}{{if .Current}} task-current{{end}}">
+        <span class="task-n">{{.N}}</span>
+        <span class="task-summary">{{.Summary}}</span>
+        <span class="pill plan-status-{{.Status}}">{{.Status}}</span>
+        {{if .Note}}<p class="help task-note">{{.Note}}</p>{{end}}
+      </li>
+    {{end}}
+    </ul>
+  </section>
+
+  {{if .Data.CanApprove}}
+    <section class="card plan-actions">
+      <h2>Approve this plan?</h2>
+      <p class="muted">Approval starts the work from the current commit. Nothing has been changed yet.</p>
+      <form method="post" action="/plan/approve"><button class="btn btn-primary" type="submit">Approve plan</button></form>
+      <form method="post" action="/plan/revise" class="stack">
+        <div class="field"><label for="feedback">Ask for a revision</label><textarea id="feedback" name="feedback" rows="3" placeholder="What should change?" required></textarea></div>
+        <button class="btn btn-danger" type="submit">Request a revision</button>
+      </form>
+    </section>
+  {{end}}
+{{end}}
+{{end}}

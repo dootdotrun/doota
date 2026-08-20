@@ -1,0 +1,40 @@
+{{define "content"}}
+{{if not .Data.Project}}
+  <section class="card">
+    <h2>Nothing recorded yet</h2>
+    <p class="muted">Create a project and use doot to see cleared conversation history and the forensic tool log here.</p>
+  </section>
+{{else}}
+  <section class="card">
+    <p class="phase-tag">{{.Data.Project.Name}}</p>
+    <h2>Cleared conversation</h2>
+    <p class="muted">Clear Conversation archives messages; it never deletes them. Newest first.</p>
+    {{if .Data.Archived}}
+      <details class="archive-era">
+        <summary>{{len .Data.Archived}} archived messages</summary>
+        <div class="archive-messages">
+        {{range .Data.Archived}}
+          <article><strong>{{.Role}}{{if .Kind}} · {{.Kind}}{{end}}</strong><span>{{.At}}</span><p>{{.Content}}</p></article>
+        {{end}}
+        </div>
+      </details>
+    {{else}}<p class="muted">Nothing has been cleared yet.</p>{{end}}
+  </section>
+
+  <section class="card">
+    <h2>Tool call log</h2>
+    <form method="get" action="/activity" class="activity-filter">
+      <input type="text" name="tool" value="{{.Data.ToolName}}" placeholder="Tool name">
+      <label class="switch"><input type="checkbox" name="errors" value="1" {{if .Data.ErrorsOnly}}checked{{end}}> Errors only</label>
+      <button type="submit" class="btn btn-small">Filter</button>
+    </form>
+    {{if .Data.ToolCalls}}
+      <ul class="tool-history">
+      {{range .Data.ToolCalls}}
+        <li><div><strong>{{.Name}}</strong>{{if .IsError}}<span class="pill pill-err">error</span>{{end}}<span>{{.At}} · {{.Duration}}</span></div><pre class="log">{{.Content}}</pre></li>
+      {{end}}
+      </ul>
+    {{else}}<p class="muted">No matching model-run tool calls.</p>{{end}}
+  </section>
+{{end}}
+{{end}}

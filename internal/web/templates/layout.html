@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>{{.Title}} · doot</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b0b0f">
+<meta name="color-scheme" content="dark light">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="doot">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/hold.js" defer></script>
+{{if eq .Active "chat"}}<script src="/static/chat.js" defer></script>{{end}}
+{{if eq .Active "plan"}}<script src="/static/plan.js" defer></script>{{end}}
+</head>
+<body>
+
+<header class="statusbar">
+  <span class="statusbar-title">{{.Title}}</span>
+  {{if .Status}}<span class="chip">{{.Status}}</span>{{end}}
+</header>
+
+<main class="content">
+  {{if .Error}}<p class="banner banner-err">{{.Error}}</p>{{end}}
+  {{if .Notice}}<p class="banner banner-ok">{{.Notice}}</p>{{end}}
+  {{template "content" .}}
+</main>
+
+<nav class="tabbar">
+  <a href="/" class="tab{{if eq .Active "chat"}} tab-active{{end}}">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-8 8H8l-5 3 1.5-5.5A8 8 0 1 1 21 12z"/></svg>
+    <span>Chat</span>
+  </a>
+  <a href="/plan" class="tab{{if eq .Active "plan"}} tab-active{{end}}">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 12h16M4 18h7"/></svg>
+    <span>Plan</span>
+  </a>
+  <a href="/project" class="tab{{if eq .Active "project"}} tab-active{{end}}">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h6l2 2h8v9H4z"/></svg>
+    <span>Project</span>
+  </a>
+  <a href="/activity" class="tab{{if eq .Active "activity"}} tab-active{{end}}">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15l4-7 4 5 3-8 4 10h3"/></svg>
+    <span>Activity</span>
+  </a>
+  <a href="/settings" class="tab{{if eq .Active "settings"}} tab-active{{end}}">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M4.2 7.5l2.6 1.5m10.4 6-2.6-1.5M4.2 16.5l2.6-1.5m10.4-6-2.6 1.5"/></svg>
+    <span>Settings</span>
+  </a>
+</nav>
+
+
+</body>
+</html>

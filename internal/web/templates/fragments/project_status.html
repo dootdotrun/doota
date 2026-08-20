@@ -1,0 +1,35 @@
+{{/*
+  Status card for the Project screen.
+
+  The polling attributes are present only while provisioning, so when setup
+  finishes the swapped-in fragment has no trigger and polling stops by itself.
+*/}}
+<section id="project-status" class="card"
+  {{if .Provisioning}}hx-get="/project/status" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+
+  <div class="row">
+    <h2>Sandbox</h2>
+    <span class="pill {{.StatusClass}}">{{.StatusLabel}}</span>
+  </div>
+
+  {{if .Provisioning}}
+    <p class="muted">Provisioning the sandbox, cloning the repo, and checking out
+       <code>{{.WorkBranch}}</code>. This page updates itself.</p>
+  {{else if eq .Project.SandboxStatus "error"}}
+    <p class="muted">Setup did not finish. The log below says where it stopped.
+       <strong>Recreate</strong> starts over from scratch.</p>
+  {{else if eq .Project.SandboxStatus "missing"}}
+    <p class="muted">The sandbox no longer exists. <strong>Recreate</strong> will
+       provision a new one and re-clone the repo.</p>
+  {{else if eq .Project.SandboxStatus "sleeping"}}
+    <p class="muted">Asleep, which costs nothing. The filesystem is intact and any
+       request wakes it.</p>
+  {{end}}
+
+  {{if .Log}}
+    <details class="log-details" {{if .Provisioning}}open{{end}}>
+      <summary>Setup log</summary>
+      <pre class="log">{{.Log}}</pre>
+    </details>
+  {{end}}
+</section>
