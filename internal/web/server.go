@@ -18,7 +18,6 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/dootdotrun/doot-ai/internal/agent"
-	"github.com/dootdotrun/doot-ai/internal/config"
 	"github.com/dootdotrun/doot-ai/internal/events"
 	"github.com/dootdotrun/doot-ai/internal/project"
 	"github.com/dootdotrun/doot-ai/internal/store"
@@ -37,7 +36,6 @@ const sessionTTL = 30 * 24 * time.Hour
 
 // Server holds the HTTP layer's dependencies.
 type Server struct {
-	cfg       *config.Config
 	store     *store.Store
 	projects  *project.Service
 	log       *slog.Logger
@@ -52,18 +50,17 @@ type Server struct {
 
 // New builds the server, parsing templates up front so a broken template fails
 // at boot rather than on the request that happens to use it.
-func New(cfg *config.Config, st *store.Store, projects *project.Service,
-	agents *agent.Service, hub *events.Hub, log *slog.Logger) (*Server, error) {
+func New(st *store.Store, projects *project.Service,
+	agents *agent.Service, hub *events.Hub, sessionSecret string, log *slog.Logger) (*Server, error) {
 	pages, fragments, err := parseTemplates()
 	if err != nil {
 		return nil, err
 	}
 	return &Server{
-		cfg:       cfg,
 		store:     st,
 		projects:  projects,
 		log:       log,
-		sess:      session.NewManager(cfg.SessionSecret, sessionTTL),
+		sess:      session.NewManager(sessionSecret, sessionTTL),
 		pages:     pages,
 		fragments: fragments,
 		limiter:   newLoginLimiter(),
@@ -88,7 +85,7 @@ var templateFuncs = template.FuncMap{
 }
 
 func parseTemplates() (pages, fragments map[string]*template.Template, err error) {
-	pageNames := []string{"login", "chat", "plan", "project", "activity", "settings"}
+	pageNames := []string{"login", "chat", "project", "activity", "settings"}
 	pages = make(map[string]*template.Template, len(pageNames))
 
 	for _, name := range pageNames {
@@ -163,7 +160,12 @@ func (s *Server) Handler() http.Handler {
 		// buffer it into uselessness.
 		r.Get("/events", s.handleEvents)
 
-		r.Get("/plan", s.handlePlan)
+		// The plan is rendered on the Chat screen. This redirect exists so an
+		// installed home-screen shortcut or a bookmark to the old tab still lands
+		// somewhere useful.
+		r.Get("/plan", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/#plan", http.StatusMovedPermanently)
+		})
 		r.Post("/plan/approve", s.handlePlanApprove)
 		r.Post("/plan/revise", s.handlePlanRevise)
 		r.Get("/plan/diff", s.handlePlanDiff)

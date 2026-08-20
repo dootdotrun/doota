@@ -137,7 +137,7 @@ func (s *Service) configureGit(ctx context.Context, p *store.Project, sb sandbox
 		return fmt.Errorf("configure git identity: exit %d", res.ExitCode)
 	}
 
-	return s.installGitCredential(ctx, p, sb)
+	return s.installGitCredential(ctx, p, sb, cfg.Secret(store.KeyGitHubToken))
 }
 
 // installGitCredential writes the PAT into the sandbox and points git at it.
@@ -152,21 +152,22 @@ func (s *Service) configureGit(ctx context.Context, p *store.Project, sb sandbox
 // to survive as long as the checkout does. Both are on the persistent sandbox
 // filesystem, so a wake never loses one without the other, and a checkpoint
 // restore rewinds them together.
-func (s *Service) installGitCredential(ctx context.Context, p *store.Project, sb sandbox.Sandbox) error {
+func (s *Service) installGitCredential(ctx context.Context, p *store.Project, sb sandbox.Sandbox, token string) error {
 	s.step(ctx, p.ID, "git credential")
 
-	if s.githubToken == "" {
-		// Load refuses to boot without GITHUB_TOKEN, so this is unreachable in a
-		// real process. It stays because a test harness can construct a Service
-		// directly, and silently producing a sandbox that cannot push would be a
-		// miserable thing to debug.
-		s.logLine(ctx, p.ID, "warning: no GitHub token configured; clone and push will fail for private repositories")
+	if token == "" {
+		// Reachable now that credentials live in the database: a fresh install can
+		// create a project before pasting a PAT into Settings. Not fatal, because a
+		// public repository still clones and the setup log is the right place to say
+		// what will not work.
+		s.logLine(ctx, p.ID, "warning: no GitHub token configured in Settings; "+
+			"private clones and all pushes will fail until one is set")
 		return nil
 	}
 
 	// x-access-token is GitHub's documented username for token authentication over
 	// HTTPS. The password field is the PAT.
-	line := fmt.Sprintf("https://x-access-token:%s@github.com\n", s.githubToken)
+	line := fmt.Sprintf("https://x-access-token:%s@github.com\n", token)
 	if err := sb.WriteFile(ctx, GitCredentialsPath, []byte(line), 0o600); err != nil {
 		return fmt.Errorf("write git credential: %w", err)
 	}

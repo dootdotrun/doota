@@ -1,6 +1,11 @@
 # Templates, static assets, and migrations are all embedded in the binary, so the
 # runtime image needs nothing but the binary and CA certificates.
 
+# The tag floats across 1.25.x on purpose. go.mod requires go >= 1.25.8 (a
+# transitive requirement of superfly/sprites-go), and this tag always resolves to
+# the newest 1.25 patch, so it satisfies that without pinning a release that will
+# stop receiving fixes. If it ever resolves older than the go.mod directive the
+# build still succeeds — Go fetches the required toolchain — it is just slower.
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src

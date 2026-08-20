@@ -43,23 +43,21 @@ type Service struct {
 	provider sandbox.Provider
 	log      *slog.Logger
 
-	// githubToken is installed into each sandbox during provisioning. Held here
-	// rather than in app_config because it is a credential, and this codebase
-	// keeps credentials in the environment where they cannot be rendered.
-	githubToken string
-
 	mu       sync.Mutex
 	inflight map[string]struct{}
 }
 
 // New builds the service.
-func New(st *store.Store, provider sandbox.Provider, githubToken string, log *slog.Logger) *Service {
+//
+// No credential is captured here. The GitHub token installed into each sandbox is
+// read from the configuration snapshot that provisioning already loads, so
+// correcting it on the Settings screen is enough to make the next provision work.
+func New(st *store.Store, provider sandbox.Provider, log *slog.Logger) *Service {
 	return &Service{
-		store:       st,
-		provider:    provider,
-		githubToken: githubToken,
-		log:         log,
-		inflight:    map[string]struct{}{},
+		store:    st,
+		provider: provider,
+		log:      log,
+		inflight: map[string]struct{}{},
 	}
 }
 

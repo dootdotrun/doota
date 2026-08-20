@@ -382,7 +382,7 @@ func (gitPushTool) Execute(ctx context.Context, in json.RawMessage, env *Env) (R
 			hint = "\n\nThe GitHub token was rejected. It is installed in the sandbox as a credential-store " +
 				"file, so this is a problem with the token itself: it may lack repo scope, have expired, or " +
 				"not grant write access to this repository. Do not retry — report it so the operator can " +
-				"replace GITHUB_TOKEN."
+				"replace the GitHub token on the Settings screen."
 		}
 		return fail("push failed (exit %d): %s%s", res.ExitCode, output, hint), nil
 	}
@@ -450,7 +450,8 @@ func (createPRTool) Execute(ctx context.Context, in json.RawMessage, env *Env) (
 	}
 	if env.GitHubToken == "" {
 		return fail("no GitHub token is configured, so a pull request cannot be opened. " +
-			"The push already succeeded; tell the user to open it themselves, or to set GITHUB_TOKEN and redeploy."), nil
+			"The push already succeeded; tell the user to open it themselves, or to set a GitHub token " +
+			"on the Settings screen — it takes effect immediately, with no redeploy."), nil
 	}
 
 	owner, repo, failure := parseGitHubRepo(p.RepoURL)

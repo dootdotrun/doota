@@ -2,14 +2,14 @@
 {{range .}}
   {{if eq .Kind "ask_human"}}
     <div class="turn assistant ask-human" data-message-id="{{.ID}}">
-      <div class="bubble"><strong>Question</strong><br>{{.Content}}</div>
+      <div class="bubble prose">{{.HTML}}</div>
       <span class="turn-time">{{.At}}</span>
     </div>
 
   {{else if and (eq .Kind "review") .Review}}
     <section class="turn review-card{{if .Review.Clean}} review-clean-card{{end}}" data-message-id="{{.ID}}">
       <div class="review-head"><strong>Independent review</strong><span class="pill {{if .Review.Clean}}pill-ok{{else}}pill-err{{end}}">{{if .Review.Clean}}clean{{else}}findings{{end}}</span></div>
-      <pre class="log review-findings">{{.Review.Findings}}</pre>
+      <div class="review-findings prose">{{.Review.Findings}}</div>
     </section>
 
   {{else if eq .Role "tool"}}
@@ -29,17 +29,25 @@
 {{end}}</pre>
         </div>
       {{end}}
+      {{/* Tool output is command output. It stays verbatim in a <pre>. */}}
       <pre class="log">{{.Content}}</pre>
     </details>
 
   {{else if eq .Kind "notice"}}
     <div class="turn notice" data-message-id="{{.ID}}">
-      <p>{{.Content}}</p>
+      <div class="prose">{{.HTML}}</div>
+    </div>
+
+  {{else if eq .Role "user"}}
+    {{/* Shown exactly as typed: no markdown, so nothing is reinterpreted. */}}
+    <div class="turn user" data-message-id="{{.ID}}">
+      <div class="bubble">{{.Content}}{{if .Interrupted}}<span class="cut"> — interrupted</span>{{end}}</div>
+      <span class="turn-time">{{.At}}</span>
     </div>
 
   {{else}}
     <div class="turn {{.Role}}" data-message-id="{{.ID}}">
-      <div class="bubble">{{.Content}}{{if .Interrupted}}<span class="cut"> — interrupted</span>{{end}}</div>
+      <div class="bubble prose">{{.HTML}}{{if .Interrupted}}<span class="cut"> — interrupted</span>{{end}}</div>
       <span class="turn-time">{{.At}}</span>
     </div>
   {{end}}

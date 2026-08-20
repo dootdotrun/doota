@@ -4,8 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sign in · doot</title>
-<meta name="theme-color" content="#0b0b0f">
-<meta name="color-scheme" content="dark light">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#ffffff">
+<meta name="color-scheme" content="light">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="doot">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="icon" href="/static/icon-192.png">
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="stylesheet" href="/static/app.css">
@@ -19,14 +24,18 @@
   {{if .Error}}<p class="banner banner-err">{{.Error}}</p>{{end}}
 
   <form method="post" action="/login" class="stack">
-    <label for="username">Username</label>
-    <input id="username" name="username" type="text"
-           autocomplete="username" autocapitalize="none" autocorrect="off"
-           required autofocus>
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text"
+             autocomplete="username" autocapitalize="none" autocorrect="off"
+             required autofocus>
+    </div>
 
-    <label for="password">Password</label>
-    <input id="password" name="password" type="password"
-           autocomplete="current-password" required>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password"
+             autocomplete="current-password" required>
+    </div>
 
     <button type="submit" class="btn btn-primary">Sign in</button>
   </form>

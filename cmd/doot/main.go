@@ -47,15 +47,16 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 1. Environment. Fatal on anything missing.
+	// 1. Environment. One required variable: the database URL. Everything else,
+	//    credentials included, is a row in app_config edited on the Settings screen.
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	log.Info("configuration loaded", "port", cfg.Port, "model", cfg.ModelName)
-	if cfg.SessionSecretEphemeral {
-		log.Warn("SESSION_SECRET not set: generated an ephemeral one, " +
-			"so every session ends when this process does")
+	log.Info("configuration loaded", "port", cfg.Port, "sandbox_provider", cfg.SandboxProvider)
+	if retired := cfg.LegacySeedNames(); len(retired) > 0 {
+		log.Warn("found retired environment variables; they seeded the database on a key that did not exist "+
+			"yet and can now be removed from the deployment", "variables", retired)
 	}
 
 	// 2. Database. Fatal: without the store there is no loop and no degraded mode.
@@ -97,14 +98,24 @@ func run(log *slog.Logger) error {
 		log.Warn("marked interrupted provisioning as failed", "projects", n)
 	}
 
-	// 8. Sandbox provider.
-	provider, err := buildSandboxProvider(cfg, log)
+	// 8. Sandbox provider. The Sprites token is read from configuration on each
+	//    operation, through the cached snapshot, so it is a closure rather than a
+	//    value captured here.
+	spriteToken := func(ctx context.Context) (string, error) {
+		appCfg, err := st.LoadConfig(ctx)
+		if err != nil {
+			return "", err
+		}
+		return appCfg.Secret(store.KeySpriteToken), nil
+	}
+
+	provider, err := buildSandboxProvider(cfg, spriteToken, log)
 	if err != nil {
 		return err
 	}
 	defer provider.Close()
 
-	projects := project.New(st, provider, cfg.GitHubToken, log)
+	projects := project.New(st, provider, log)
 
 	// 9. The model client, the tool registry, the event hub, and the loop that
 	//    ties them together. None of these can fail: the model endpoint is not
@@ -113,16 +124,31 @@ func run(log *slog.Logger) error {
 	//    Settings.
 	hub := events.NewHub(log)
 	registry := tools.Primary()
-	modelClient := model.New(cfg.ModelAPIKey, cfg.ModelEndpoint, log)
+	modelClient := model.New(log)
 	reviewer := tools.Reviewer()
-	agents := agent.New(st, projects, modelClient, registry, reviewer, hub, cfg.GitHubToken, log)
+	agents := agent.New(st, projects, modelClient, registry, reviewer, hub, log)
 	if err := agents.Recover(ctx); err != nil {
 		return fmt.Errorf("recover interrupted runs: %w", err)
 	}
-	log.Info("agent ready", "tools", registry.Len(), "model", cfg.ModelName)
+	log.Info("agent ready", "tools", registry.Len())
 
-	// 10. Serve.
-	srv, err := web.New(cfg, st, projects, agents, hub, log)
+	// 9b. Report what still needs configuring. A fresh deployment is expected to
+	//     reach this point with nothing set: the operator's next step is the
+	//     Settings screen, and the app says so there too.
+	if appCfg, err := st.LoadConfig(ctx); err == nil {
+		if missing := appCfg.MissingCredentials(); len(missing) > 0 {
+			log.Warn("credentials are not configured yet; set them on the Settings screen", "missing", missing)
+		}
+	}
+
+	// 10. Serve. The cookie signing key is persisted rather than environmental, so
+	//     sessions survive a deploy instead of ending with the process.
+	sessionSecret, err := st.EnsureSessionSecret(ctx, log, cfg.SessionSecretSeed())
+	if err != nil {
+		return err
+	}
+
+	srv, err := web.New(st, projects, agents, hub, sessionSecret, log)
 	if err != nil {
 		return err
 	}
@@ -165,7 +191,8 @@ func run(log *slog.Logger) error {
 }
 
 // buildSandboxProvider selects the sandbox implementation.
-func buildSandboxProvider(cfg *config.Config, log *slog.Logger) (sandbox.Provider, error) {
+func buildSandboxProvider(cfg *config.Config, spriteToken func(context.Context) (string, error),
+	log *slog.Logger) (sandbox.Provider, error) {
 	switch cfg.SandboxProvider {
 	case config.ProviderLocal:
 		// Loud on purpose: a local provider gives an agent the host filesystem
@@ -176,7 +203,7 @@ func buildSandboxProvider(cfg *config.Config, log *slog.Logger) (sandbox.Provide
 
 	case config.ProviderSprites:
 		log.Info("using the Fly Sprites sandbox provider")
-		return sandbox.NewSpritesProvider(cfg.SpriteToken), nil
+		return sandbox.NewSpritesProvider(spriteToken), nil
 
 	default:
 		return nil, fmt.Errorf("unknown sandbox provider %q", cfg.SandboxProvider)

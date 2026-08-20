@@ -19,61 +19,52 @@ type taskView struct {
 	Current         bool
 }
 
-type planData struct {
-	Project                   *store.Project
-	Run                       *store.Run
+// planView is the task board as the Chat screen renders it.
+type planView struct {
 	Title, Status, BaseCommit string
 	Feedback, DiffURL         string
 	Tasks                     []taskView
-	Empty, CanApprove         bool
+	Current                   *taskView
+	Done, Total               int
+	CanApprove                bool
 }
 
-func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
-	d := planData{Empty: true}
-	p, err := s.projects.Active(r.Context())
-	if errors.Is(err, store.ErrNotFound) {
-		s.render(w, r, "plan", page{Title: "Board", Active: "plan", Status: "no project", User: userFrom(r), Data: d})
-		return
-	}
-	if err != nil {
-		s.render(w, r, "plan", page{Title: "Board", Active: "plan", Status: "unavailable", User: userFrom(r),
-			Error: "Could not load the project.", Data: d})
-		return
-	}
-	d.Project = p
-	if run, runErr := s.agent.ActiveRun(r.Context(), p.ID); runErr == nil {
-		d.Run = run
-	}
-
+// loadPlan builds the plan view, or nil when there is nothing planned.
+//
+// Errors are logged and swallowed: the plan is a panel on the Chat screen now, and
+// failing to read the scratchpad should cost the panel, not the conversation.
+func (s *Server) loadPlan(r *http.Request, p *store.Project, run *store.Run) *planView {
 	pad, err := s.store.Scratchpad(r.Context(), p.ID)
 	if err != nil {
-		s.log.Error("plan: read scratchpad", "error", err)
-		s.render(w, r, "plan", page{Title: "Board", Active: "plan", Status: "unavailable", User: userFrom(r),
-			Error: "Could not load the task board.", Data: d})
-		return
+		s.log.Error("chat: read scratchpad", "error", err)
+		return nil
 	}
-	d.Feedback = pad.Feedback
-	d.Empty = pad.Empty()
-	if !d.Empty {
-		d.Title, d.Status, d.BaseCommit = pad.Title, pad.Status, pad.BaseCommit
-		current := pad.Current()
-		for _, t := range pad.Tasks {
-			d.Tasks = append(d.Tasks, taskView{N: t.N, Summary: t.Summary, Status: t.Status, Note: t.Note,
-				Current: current != nil && current.N == t.N})
-		}
-		if pad.BaseCommit != "" {
-			d.DiffURL = "/plan/diff"
-		}
-		d.CanApprove = d.Run != nil && d.Run.State == store.RunAwaitingHuman &&
-			d.Run.Awaiting() == store.AwaitingPlanApproval && pad.AwaitingApproval()
+	if pad.Empty() {
+		return nil
 	}
 
-	status := "no plan"
-	if !d.Empty {
-		status = pad.Status
+	v := &planView{
+		Title: pad.Title, Status: pad.Status, BaseCommit: pad.BaseCommit,
+		Feedback: pad.Feedback, Total: len(pad.Tasks),
 	}
-	s.render(w, r, "plan", page{Title: "Board", Active: "plan", Status: status, User: userFrom(r),
-		Notice: r.URL.Query().Get("notice"), Error: r.URL.Query().Get("error"), Data: d})
+	current := pad.Current()
+	for _, t := range pad.Tasks {
+		task := taskView{N: t.N, Summary: t.Summary, Status: t.Status, Note: t.Note,
+			Current: current != nil && current.N == t.N}
+		if t.Status == "complete" {
+			v.Done++
+		}
+		v.Tasks = append(v.Tasks, task)
+		if task.Current {
+			v.Current = &v.Tasks[len(v.Tasks)-1]
+		}
+	}
+	if pad.BaseCommit != "" {
+		v.DiffURL = "/plan/diff"
+	}
+	v.CanApprove = run != nil && run.State == store.RunAwaitingHuman &&
+		run.Awaiting() == store.AwaitingPlanApproval && pad.AwaitingApproval()
+	return v
 }
 
 func (s *Server) handlePlanApprove(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +76,7 @@ func (s *Server) handlePlanApprove(w http.ResponseWriter, r *http.Request) {
 		s.redirectPlan(w, r, "", "Could not approve: "+err.Error())
 		return
 	}
-	s.redirectPlan(w, r, "Plan approved. Starting the first subtask.", "")
+	s.redirectPlan(w, r, "Plan approved. Starting the first task.", "")
 }
 
 func (s *Server) handlePlanRevise(w http.ResponseWriter, r *http.Request) {
@@ -149,8 +140,9 @@ func (s *Server) requireProjectForPlan(w http.ResponseWriter, r *http.Request) (
 	return p, true
 }
 
+// redirectPlan returns to the Chat screen, which is where the plan is rendered.
 func (s *Server) redirectPlan(w http.ResponseWriter, r *http.Request, notice, errorMessage string) {
-	target := "/plan"
+	target := "/"
 	if errorMessage != "" {
 		target += "?error=" + urlQueryEscape(errorMessage)
 	} else if notice != "" {
@@ -184,13 +176,13 @@ const archivedLimit = 200
 func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	projectRow, err := s.store.MostRecentProject(r.Context())
 	if errors.Is(err, store.ErrNotFound) {
-		s.render(w, r, "activity", page{Title: "Activity", Active: "activity", Status: "nothing yet",
+		s.render(w, r, "activity", page{Title: "History", Active: "project", Status: "nothing yet",
 			User: userFrom(r), Data: activityData{}})
 		return
 	}
 	if err != nil {
 		s.log.Error("activity: load project", "error", err)
-		s.render(w, r, "activity", page{Title: "Activity", Active: "activity", Status: "unavailable",
+		s.render(w, r, "activity", page{Title: "History", Active: "project", Status: "unavailable",
 			User: userFrom(r), Error: "Could not load history.", Data: activityData{}})
 		return
 	}
@@ -217,5 +209,5 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 	if projectRow.DeletedAt.Valid {
 		status = "archived project"
 	}
-	s.render(w, r, "activity", page{Title: "Activity", Active: "activity", Status: status, User: userFrom(r), Data: d})
+	s.render(w, r, "activity", page{Title: "History", Active: "project", Status: status, User: userFrom(r), Data: d})
 }

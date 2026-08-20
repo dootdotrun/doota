@@ -1,21 +1,28 @@
 // Package config loads process configuration from the environment.
 //
-// Only secrets and bootstrap values live here. Everything else is runtime-
-// editable and lives in the app_config table; see internal/store.
+// There is exactly one thing this process cannot discover for itself: where its
+// database is. Everything else — every credential, every model setting, the
+// system prompt, the setup script — lives in the app_config table and is edited
+// on the Settings screen. See internal/store.
 //
-// Two of these variables — LLM_API_ENDPOINT and LLM_MODEL — name things that are
-// *also* runtime-editable settings (model.base_url, model.name). They are not a
-// competing source of truth: they seed those keys the first time the database is
-// filled, and app_config wins from then on. See Store.EnsureConfigDefaults.
+// That split is the whole design. A deployment is one environment variable
+// pasted into a dashboard, and nothing else about it requires a redeploy or a
+// command line to change. The cost is that a fresh install boots without
+// credentials and has to say so; AppConfig.MissingCredentials and the setup
+// banner exist for exactly that.
+//
+// The credential variables this package used to require are still read, but only
+// as seeds: on the first boot after they moved into the database they are copied
+// into any key that does not exist yet, and can then be deleted from the
+// environment. See LegacySeeds and Store.EnsureConfigDefaults.
 package config
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
+
+	"github.com/dootdotrun/doot-ai/internal/store"
 )
 
 // Sandbox provider identifiers.
@@ -26,64 +33,42 @@ const (
 
 // Config holds the environment-provided configuration.
 type Config struct {
-	DatabaseURL   string
-	SessionSecret string
-	ModelAPIKey   string
-	ModelEndpoint string
-	ModelName     string
-	SpriteToken   string
-	Port          string
+	// DatabaseURL is the only required variable. Read from DATABASE_URL, which is
+	// what a Fly Postgres attachment and most managed providers set, falling back
+	// to NEON_CONNECTION_STRING for continuity with earlier deployments.
+	DatabaseURL string
 
-	// GitHubToken is a scoped personal access token with repo scope. It is the
-	// single credential for every GitHub operation: git clone, fetch, and push
-	// use it through a credential file inside the sandbox, and pull requests use
-	// it directly against api.github.com from this process.
-	//
-	// Handing a PAT to the sandbox is a deliberate, accepted tradeoff for a
-	// single-operator internal tool. The alternative was the Sprites API Gateway,
-	// which proxies GitHub's REST API but not the git wire protocol — so it could
-	// open a pull request but could never push the commits the PR was for.
-	GitHubToken string
+	Port string
 
 	// SandboxProvider selects the sandbox implementation. "sprites" in any real
 	// deployment; "local" exists so the project lifecycle and preview proxy can
-	// be verified without a Fly Sprites account.
+	// be verified without a Fly Sprites account. Not a credential, and not in the
+	// database, because it describes the host rather than the operator's account —
+	// and because a UI toggle that could point an agent at this container's own
+	// filesystem is not a toggle worth having.
 	SandboxProvider string
 	LocalSandboxDir string
 
-	// SessionSecretEphemeral records that no SESSION_SECRET was supplied and one
-	// was generated for this process. Sessions then die with the process. The
-	// caller is expected to say so loudly at startup.
-	SessionSecretEphemeral bool
+	// legacySeeds carries credentials found in the environment so they can be
+	// copied into the database once. Unexported: nothing should read a credential
+	// from here.
+	legacySeeds map[string]any
 }
-
-// Secret is an environment-provided credential, surfaced on the Settings screen
-// by name and presence only. Values are never rendered.
-type Secret struct {
-	Name    string
-	Purpose string
-	Present bool
-}
-
-const minSecretLen = 32
 
 // Load reads and validates the environment.
-//
-// Every required variable must be present. A process that starts without them
-// would fail later, mid-run, at a much less obvious moment.
 func Load() (*Config, error) {
 	c := &Config{
-		DatabaseURL:     os.Getenv("NEON_CONNECTION_STRING"),
-		SessionSecret:   os.Getenv("SESSION_SECRET"),
-		ModelAPIKey:     os.Getenv("LLM_API_KEY"),
-		ModelEndpoint:   os.Getenv("LLM_API_ENDPOINT"),
-		ModelName:       os.Getenv("LLM_MODEL"),
-		SpriteToken:     os.Getenv("SPRITE_TOKEN"),
-		GitHubToken:     strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
-		Port:            os.Getenv("PORT"),
+		DatabaseURL:     firstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("NEON_CONNECTION_STRING")),
+		Port:            strings.TrimSpace(os.Getenv("PORT")),
 		SandboxProvider: strings.ToLower(strings.TrimSpace(os.Getenv("DOOT_SANDBOX_PROVIDER"))),
-		LocalSandboxDir: os.Getenv("DOOT_LOCAL_SANDBOX_DIR"),
+		LocalSandboxDir: strings.TrimSpace(os.Getenv("DOOT_LOCAL_SANDBOX_DIR")),
 	}
+
+	if c.DatabaseURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL is required (NEON_CONNECTION_STRING is also accepted): " +
+			"it is the only environment variable this app needs, and everything else is configured on the Settings screen")
+	}
+
 	if c.Port == "" {
 		c.Port = "8080"
 	}
@@ -98,96 +83,69 @@ func Load() (*Config, error) {
 		c.LocalSandboxDir = "/tmp/doot-sandboxes"
 	}
 
-	// SESSION_SECRET is deliberately not in this list. It is not a credential to
-	// anything external — it signs our own cookies — so a missing one can be
-	// generated rather than being a reason to refuse to boot. Everything else
-	// names a service we cannot invent access to.
-	//
-	// SPRITE_TOKEN stays required even under the local provider. Needing it only
-	// in one mode would mean a deployment could boot and then fail at the first
-	// project creation, which is exactly the late failure this function exists to
-	// prevent.
-	// GITHUB_TOKEN is required. Pushing a branch and opening a pull request is the
-	// whole point of the tool, and discovering the credential is absent at the end
-	// of a completed goal — after the model has done all the work — is the worst
-	// possible moment to find out.
-	var missing []string
-	for name, v := range map[string]string{
-		"NEON_CONNECTION_STRING": c.DatabaseURL,
-		"LLM_API_KEY":            c.ModelAPIKey,
-		"LLM_API_ENDPOINT":       c.ModelEndpoint,
-		"LLM_MODEL":              c.ModelName,
-		"SPRITE_TOKEN":           c.SpriteToken,
-		"GITHUB_TOKEN":           c.GitHubToken,
-	} {
-		if strings.TrimSpace(v) == "" {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		return nil, fmt.Errorf("missing required environment variables: %s", strings.Join(missing, ", "))
-	}
-
-	// A supplied secret still has to be long enough to be worth having. A
-	// generated one is always long enough, and forces every session to be
-	// re-established after a restart — acceptable for a single-user tool, and
-	// much better than refusing to start.
-	switch {
-	case strings.TrimSpace(c.SessionSecret) == "":
-		generated, err := randomSecret()
-		if err != nil {
-			return nil, fmt.Errorf("generate session secret: %w", err)
-		}
-		c.SessionSecret = generated
-		c.SessionSecretEphemeral = true
-	case len(c.SessionSecret) < minSecretLen:
-		return nil, fmt.Errorf("SESSION_SECRET must be at least %d characters, got %d", minSecretLen, len(c.SessionSecret))
-	}
-
+	c.legacySeeds = legacySeeds()
 	return c, nil
 }
 
-// randomSecret returns a 32-byte secret, hex-encoded to 64 characters.
-func randomSecret() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
+// ConfigSeeds returns values that should fill runtime-editable keys that do not
+// exist yet.
+//
+// Applied with ON CONFLICT DO NOTHING, so this runs once per key per database.
+// Editing a setting in Settings afterwards is permanent and a redeploy will not
+// stamp on it.
+func (c *Config) ConfigSeeds() map[string]any { return c.legacySeeds }
+
+// SessionSecretSeed returns a SESSION_SECRET found in the environment, if any.
+//
+// Separate from ConfigSeeds because the session key is not a ConfigFields entry
+// and so is not filled by EnsureConfigDefaults. See Store.EnsureSessionSecret.
+func (c *Config) SessionSecretSeed() string {
+	if v, ok := c.legacySeeds[store.KeySessionSecret].(string); ok {
+		return v
 	}
-	return hex.EncodeToString(buf), nil
+	return ""
 }
 
-// Secrets reports the environment-provided credentials and whether each is set.
-//
-// Load already refuses to start when any is missing, so in a running process
-// these are all present. It is still worth showing: it confirms which secrets
-// this process actually loaded, which is the question you have when something
-// authenticates unexpectedly.
-func (c *Config) Secrets() []Secret {
-	sessionPurpose := "Session cookie signing key"
-	if c.SessionSecretEphemeral {
-		sessionPurpose = "Session cookie signing key (generated — sessions end at restart)"
+// LegacySeedNames reports which retired environment variables were found, so
+// startup can say they are no longer needed.
+func (c *Config) LegacySeedNames() []string {
+	var names []string
+	for _, m := range legacyMappings {
+		if strings.TrimSpace(os.Getenv(m.env)) != "" {
+			names = append(names, m.env)
+		}
 	}
-	return []Secret{
-		{"NEON_CONNECTION_STRING", "Postgres (Neon) connection string", c.DatabaseURL != ""},
-		{"SESSION_SECRET", sessionPurpose, !c.SessionSecretEphemeral},
-		{"LLM_API_KEY", "Model API key", c.ModelAPIKey != ""},
-		{"LLM_API_ENDPOINT", "OpenAI-compatible model endpoint", c.ModelEndpoint != ""},
-		{"LLM_MODEL", "Default model id", c.ModelName != ""},
-		{"SPRITE_TOKEN", "Fly Sprites API token", c.SpriteToken != ""},
-		{"GITHUB_TOKEN", "GitHub PAT for clone, push, and pull requests", c.GitHubToken != ""},
-	}
+	return names
 }
 
-// ConfigSeeds maps runtime-editable config keys to the environment values that
-// should seed them on a fresh database.
-//
-// Only keys that genuinely have an environment counterpart appear here. The
-// values are applied with ON CONFLICT DO NOTHING, so editing them in Settings
-// later is permanent and a redeploy will not stamp on it.
-func (c *Config) ConfigSeeds() map[string]any {
-	return map[string]any{
-		"model.name":     c.ModelName,
-		"model.base_url": c.ModelEndpoint,
+// legacyMappings maps retired environment variables to the config keys they now
+// live in.
+var legacyMappings = []struct {
+	env, key string
+}{
+	{"LLM_API_KEY", store.KeyModelAPIKey},
+	{"LLM_API_ENDPOINT", store.KeyModelBaseURL},
+	{"LLM_MODEL", store.KeyModelName},
+	{"SPRITE_TOKEN", store.KeySpriteToken},
+	{"GITHUB_TOKEN", store.KeyGitHubToken},
+	{"SESSION_SECRET", store.KeySessionSecret},
+}
+
+func legacySeeds() map[string]any {
+	seeds := map[string]any{}
+	for _, m := range legacyMappings {
+		if v := strings.TrimSpace(os.Getenv(m.env)); v != "" {
+			seeds[m.key] = v
+		}
 	}
+	return seeds
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
