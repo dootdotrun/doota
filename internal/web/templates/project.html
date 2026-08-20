@@ -5,7 +5,7 @@
   <section class="card stack">
     <h2>Create a project</h2>
     <p class="muted">
-      Name and a repository URL. That provisions a sandbox, clones the repo, and
+      A name and a repository URL. That provisions a sandbox, clones the repo, and
       checks out the <code>doot</code> branch. There is no other setup step.
     </p>
 
@@ -23,9 +23,9 @@
                autocapitalize="none" autocorrect="off" spellcheck="false"
                placeholder="https://github.com/you/thing.git">
         <p class="help">
-          Public and private repositories both work. The GITHUB_TOKEN PAT is
-          installed in the sandbox as a git credential, so clone, fetch, and push
-          all use native git over HTTPS. An SSH-style
+          Public and private both work. The GitHub token from Settings is installed
+          in the sandbox as a git credential, so clone, fetch, and push all use
+          native git over HTTPS. An SSH-style
           <code>git@github.com:owner/repo</code> URL is rewritten to HTTPS.
         </p>
       </div>
@@ -38,9 +38,10 @@
     <h2>One project at a time</h2>
     <p class="muted">
       Enforced by a unique index in Postgres, not a check in the UI. To work on
-      something else, delete this project and create another — the conversation
-      and tool history of the old one stay readable on Activity.
+      something else, delete this project and create another — the conversation and
+      tool history of the old one stay readable in History.
     </p>
+    <p class="help"><a href="/activity">Open History</a></p>
   </section>
 
 {{else}}
@@ -100,14 +101,15 @@
     <form method="post" action="/project/clear-conversation">
       <button type="submit" class="btn" data-hold="1200" data-hold-active="Hold to archive…">Clear conversation</button>
     </form>
-    <p class="help">Archived messages remain readable on Activity. This is unavailable while doot is running.</p>
+    <p class="help">
+      Archived messages stay readable in <a href="/activity">History</a>. Unavailable
+      while doot is running.
+    </p>
   </section>
 
   <section class="card stack danger">
     <h2>Sandbox recovery</h2>
-    <p class="muted">
-      In increasing order of destructiveness. Try them in that order.
-    </p>
+    <p class="muted">In increasing order of destructiveness. Try them in that order.</p>
 
     <form method="post" action="/project/wake">
       <button type="submit" class="btn">Wake</button>
@@ -128,7 +130,7 @@
     </form>
     <p class="help">
       Destroys the sandbox and clears the project. Conversation, goals, and tool
-      history are kept and stay readable on Activity.
+      history are kept and stay readable in <a href="/activity">History</a>.
     </p>
   </section>
 

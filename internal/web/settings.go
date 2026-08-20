@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dootdotrun/doot-ai/internal/config"
 	"github.com/dootdotrun/doot-ai/internal/store"
 )
 
 const minPasswordLen = 6
+
+// clearSuffix names the companion checkbox that empties a stored secret.
+const clearSuffix = "__clear"
 
 type settingsField struct {
 	Key     string
@@ -19,19 +21,43 @@ type settingsField struct {
 	Kind    string
 	Value   string
 	Checked bool
+
+	// Secret fields render an empty input whatever is stored. IsSet is the only
+	// thing said about the stored value, and Placeholder says what submitting
+	// nothing will do.
+	Secret bool
+	IsSet  bool
 }
+
+// Placeholder is the hint shown inside an empty secret input.
+func (f settingsField) Placeholder() string {
+	if f.IsSet {
+		return "stored — leave blank to keep"
+	}
+	return "not set"
+}
+
+// ClearKey names the checkbox that removes a stored secret.
+func (f settingsField) ClearKey() string { return f.Key + clearSuffix }
 
 type settingsGroup struct {
 	Name   string
 	Fields []settingsField
+
+	// Collapsed starts the group closed. The system prompt and the setup script
+	// are each a screen tall and are edited once in a blue moon, so leaving them
+	// open buries the four fields anyone actually comes here for. Fields inside a
+	// closed <details> still submit with the form.
+	Collapsed bool
 }
 
 type settingsData struct {
 	Groups                 []settingsGroup
-	Secrets                []config.Secret
 	Username               string
 	PasswordChangeRequired bool
 	SessionDays            int
+	Missing                []string
+	Provider               string
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -40,9 +66,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.store.LoadConfig(r.Context())
 	if err != nil {
 		s.log.Error("load config", "error", err)
+		// Data must be a settingsData even here: the template dereferences it on
+		// its first line, so rendering with a nil Data would turn "could not load
+		// configuration" into a bare 500.
 		s.render(w, r, "settings", page{
 			Title: "Settings", Active: "settings", User: user,
 			Error: "Could not load configuration.",
+			Data:  settingsData{Username: user.Username},
 		})
 		return
 	}
@@ -50,15 +80,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "settings", page{
 		Title:  "Settings",
 		Active: "settings",
-		Status: "configuration",
 		User:   user,
 		Notice: r.URL.Query().Get("notice"),
 		Data: settingsData{
 			Groups:                 buildGroups(cfg),
-			Secrets:                s.cfg.Secrets(),
 			Username:               user.Username,
 			PasswordChangeRequired: user.PasswordChangeRequired,
 			SessionDays:            int(s.sess.TTL().Hours() / 24),
+			Missing:                cfg.MissingCredentials(),
+			Provider:               s.projects.ProviderKind(),
 		},
 	})
 }
@@ -78,9 +108,20 @@ func buildGroups(cfg store.AppConfig) []settingsGroup {
 				Kind:    string(f.Kind),
 				Value:   cfg.Display(f),
 				Checked: f.Kind == store.KindBool && cfg.Bool(f.Key),
+				Secret:  f.Secret(),
+				IsSet:   cfg.IsSet(f.Key),
 			})
 		}
 		if len(g.Fields) > 0 {
+			// A group is collapsed when everything in it is a full-height textarea,
+			// which is the same thing as "this is the long, rarely-touched stuff".
+			g.Collapsed = true
+			for _, f := range g.Fields {
+				if f.Kind != string(store.KindTextarea) {
+					g.Collapsed = false
+					break
+				}
+			}
 			groups = append(groups, g)
 		}
 	}
@@ -110,7 +151,22 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if !r.PostForm.Has(f.Key) {
 			continue
 		}
-		parsed, err := store.ParseValue(f, r.PostFormValue(f.Key))
+		raw := r.PostFormValue(f.Key)
+
+		if f.Secret() && strings.TrimSpace(raw) == "" {
+			// Blank means "keep", because a secret input is always rendered empty and
+			// an empty submission therefore carries no information. Without this,
+			// saving the form to change the model name would erase every credential.
+			//
+			// Which leaves no way to remove a revoked token, so clearing is an
+			// explicit checkbox rather than an overloaded empty string.
+			if r.PostForm.Has(f.Key + clearSuffix) {
+				values[f.Key] = ""
+			}
+			continue
+		}
+
+		parsed, err := store.ParseValue(f, raw)
 		if err != nil {
 			s.settingsStatus(w, false, err.Error())
 			return

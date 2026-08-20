@@ -1,9 +1,14 @@
 // Package session implements stateless, signed session cookies.
 //
-// There is no session table. Rotating SESSION_SECRET invalidates every session,
-// which is the logout-everywhere button. For a single-user tool that is
-// sufficient - a session table would exist only to revoke sessions belonging to
-// nobody else.
+// There is no session table. The signing key is generated on first boot and kept
+// in app_config under session.secret (see Store.EnsureSessionSecret), so deleting
+// that row invalidates every session — the logout-everywhere button. For a
+// single-user tool that is sufficient: a session table would exist only to revoke
+// sessions belonging to nobody else.
+//
+// The key is persisted rather than environmental because the environment version
+// regenerated it whenever SESSION_SECRET was unset, which signed the operator out
+// on every deploy.
 package session
 
 import (

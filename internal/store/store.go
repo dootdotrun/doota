@@ -16,6 +16,15 @@ import (
 // Store wraps the database handle.
 type Store struct {
 	DB *sql.DB
+
+	// cfgCache serves app_config from memory.
+	//
+	// Configuration is now the only source of credentials, which means it is read
+	// on paths that used to touch nothing: every agent step, every tool call,
+	// every page render, and every sandbox command. A round trip to Neon on each
+	// of those would be a latency tax paid hundreds of times per goal for data
+	// that changes when one person edits one form. See LoadConfig.
+	cfgCache configCache
 }
 
 // Open connects to Postgres and verifies the connection.

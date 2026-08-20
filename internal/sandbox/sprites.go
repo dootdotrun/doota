@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	sprites "github.com/superfly/sprites-go"
@@ -20,41 +21,118 @@ import (
 // StorageGB overrides, and all of them are left nil so the platform scales the
 // Sprite by itself and bills actual usage. Choosing a size up front means
 // guessing wrong in one of two directions; not choosing removes both.
+// The API token is resolved per operation rather than captured once, because it
+// is configuration now: it is pasted into the Settings screen, and a provider
+// holding the value it saw at boot would keep failing after the operator fixed a
+// typo. The SDK client is cached and rebuilt only when the token actually
+// changes, so the steady state is one client for the life of the process.
 type SpritesProvider struct {
-	client *sprites.Client
+	token func(context.Context) (string, error)
+
+	mu sync.Mutex
+	// clients is keyed by token. Keyed rather than replaced because a sandbox
+	// handed out earlier still holds the client it was created with and may be
+	// mid-command, so the displaced client cannot be closed on the spot — and
+	// keying means flipping between two tokens reuses two clients instead of
+	// building a new one every time.
+	clients map[string]*sprites.Client
+	closed  bool
 }
 
-// NewSpritesProvider builds a provider from an API token.
-func NewSpritesProvider(token string) *SpritesProvider {
-	return &SpritesProvider{client: sprites.New(token)}
+// NewSpritesProvider builds a provider that reads its API token on demand.
+func NewSpritesProvider(token func(context.Context) (string, error)) *SpritesProvider {
+	return &SpritesProvider{token: token, clients: map[string]*sprites.Client{}}
 }
 
 func (p *SpritesProvider) Kind() string { return "sprites" }
 
-func (p *SpritesProvider) Close() error { return p.client.Close() }
+// maxCachedClients bounds the keyed client map. One token is the normal case and
+// two is a rotation in progress; anything beyond that is a bug, and dropping the
+// whole map is a cheaper recovery than growing without limit.
+const maxCachedClients = 4
+
+// resolve returns a client for the currently configured token.
+func (p *SpritesProvider) resolve(ctx context.Context) (*sprites.Client, error) {
+	token, err := p.token(ctx)
+	if err != nil {
+		// Distinct from "not configured" on purpose: telling the operator to set a
+		// token they already set is worse than saying the lookup failed.
+		return nil, fmt.Errorf("read Fly Sprites token: %w", err)
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, fmt.Errorf("no Fly Sprites token is configured: set one on the Settings screen")
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, fmt.Errorf("sandbox provider is shut down")
+	}
+	if c, ok := p.clients[token]; ok {
+		return c, nil
+	}
+	if len(p.clients) >= maxCachedClients {
+		for k, c := range p.clients {
+			c.Close()
+			delete(p.clients, k)
+		}
+	}
+	c := sprites.New(token)
+	p.clients[token] = c
+	return c, nil
+}
+
+func (p *SpritesProvider) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Marked closed so an operation arriving after shutdown fails rather than
+	// building a client nothing will ever close.
+	p.closed = true
+	var err error
+	for k, c := range p.clients {
+		if cerr := c.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+		delete(p.clients, k)
+	}
+	return err
+}
 
 func (p *SpritesProvider) Create(ctx context.Context, name string) (Sandbox, error) {
+	client, err := p.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// nil config: no CPU, memory, or disk override. See the type comment.
-	s, err := p.client.CreateSprite(ctx, name, nil)
+	s, err := client.CreateSprite(ctx, name, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create sprite %s: %w", name, err)
 	}
-	return &spriteSandbox{client: p.client, sprite: s, name: name}, nil
+	return &spriteSandbox{client: client, sprite: s, name: name}, nil
 }
 
 func (p *SpritesProvider) Get(ctx context.Context, name string) (Sandbox, error) {
-	s, err := p.client.GetSprite(ctx, name)
+	client, err := p.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s, err := client.GetSprite(ctx, name)
 	if err != nil {
 		if isSpriteNotFound(err) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("get sprite %s: %w", name, err)
 	}
-	return &spriteSandbox{client: p.client, sprite: s, name: name}, nil
+	return &spriteSandbox{client: client, sprite: s, name: name}, nil
 }
 
 func (p *SpritesProvider) Delete(ctx context.Context, name string) error {
-	if err := p.client.DeleteSprite(ctx, name); err != nil {
+	client, err := p.resolve(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.DeleteSprite(ctx, name); err != nil {
 		if isSpriteNotFound(err) {
 			return nil // already gone; deleting is idempotent
 		}

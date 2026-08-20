@@ -6,3 +6,5 @@ Dockerfile
 .dockerignore
 .env
 .env.*
+.smoke
+fly.toml

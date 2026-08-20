@@ -1,17 +1,28 @@
 {{define "content"}}
 
+{{if .Data.Missing}}
+<p class="banner banner-warn">
+  Missing: {{range $i, $m := .Data.Missing}}{{if $i}}, {{end}}<strong>{{$m}}</strong>{{end}}.
+  Paste them into Credentials below and save.
+</p>
+{{end}}
+
 {{if .Data.PasswordChangeRequired}}
 <p class="banner banner-warn">
-  Still using the default <code>doot</code> / <code>doot</code> credentials.
-  Change them below.
+  Still using the default <code>doot</code> / <code>doot</code> sign-in. Change it below.
 </p>
 {{end}}
 
 <form class="card stack" hx-post="/settings/config" hx-target="#config-status" hx-swap="outerHTML">
   <input type="hidden" name="_config_form" value="1">
   {{range .Data.Groups}}
+    {{if .Collapsed}}
+    <details class="disclose group group-collapsed">
+      <summary>{{.Name}}</summary>
+    {{else}}
     <fieldset class="group">
       <legend>{{.Name}}</legend>
+    {{end}}
       {{range .Fields}}
         <div class="field">
           {{if eq .Kind "bool"}}
@@ -19,6 +30,25 @@
               <input type="checkbox" name="{{.Key}}" value="true" {{if .Checked}}checked{{end}}>
               <span>{{.Label}}</span>
             </label>
+          {{else if eq .Kind "secret"}}
+            {{/*
+              Always rendered empty. The value is never sent to the browser, and an
+              empty submission means "keep what is stored" — see handleSaveConfig.
+            */}}
+            <div class="field-head">
+              <label for="{{.Key}}">{{.Label}}</label>
+              {{if .IsSet}}<span class="pill pill-ok">set</span>{{else}}<span class="pill pill-err">not set</span>{{end}}
+            </div>
+            <input id="{{.Key}}" name="{{.Key}}" type="password" value=""
+                   placeholder="{{.Placeholder}}" autocomplete="off"
+                   autocapitalize="none" autocorrect="off" spellcheck="false">
+            {{if .IsSet}}
+              {{/* The only way to remove a revoked token, since blank means keep. */}}
+              <label class="switch switch-clear">
+                <input type="checkbox" name="{{.ClearKey}}" value="1">
+                <span>Remove the stored value</span>
+              </label>
+            {{end}}
           {{else}}
             <label for="{{.Key}}">{{.Label}}</label>
             {{if eq .Kind "textarea"}}
@@ -33,33 +63,15 @@
           {{if .Help}}<p class="help">{{.Help}}</p>{{end}}
         </div>
       {{end}}
-    </fieldset>
+    {{if .Collapsed}}</details>{{else}}</fieldset>{{end}}
   {{end}}
 
-  <p id="config-status" class="status-idle">Unsaved changes are not kept.</p>
-  <button type="submit" class="btn btn-primary">Save configuration</button>
+  <p id="config-status" class="status-idle">Everything here is stored in the database. No redeploy.</p>
+  <button type="submit" class="btn btn-primary">Save</button>
 </form>
 
-<section class="card">
-  <h2>Secrets</h2>
-  <p class="muted">
-    Environment variables, set with <code>fly secrets set</code>. Values are
-    never shown or editable here — the process refuses to start without them.
-  </p>
-  <ul class="secrets">
-    {{range .Data.Secrets}}
-      <li>
-        <code>{{.Name}}</code>
-        {{if .Present}}<span class="pill pill-ok">set</span>
-        {{else}}<span class="pill pill-err">missing</span>{{end}}
-        <span class="help">{{.Purpose}}</span>
-      </li>
-    {{end}}
-  </ul>
-</section>
-
 <form class="card stack" method="post" action="/settings/credentials">
-  <h2>Credentials</h2>
+  <h2>Sign-in</h2>
 
   <div class="field">
     <label for="cred-username">Username</label>
@@ -70,7 +82,7 @@
   <div class="field">
     <label for="cred-password">New password</label>
     <input id="cred-password" name="password" type="password" autocomplete="new-password">
-    <p class="help">Leave blank to keep your current password.</p>
+    <p class="help">Leave blank to keep the current one.</p>
   </div>
 
   <div class="field">
@@ -78,15 +90,15 @@
     <input id="cred-confirm" name="password_confirm" type="password" autocomplete="new-password">
   </div>
 
-  <button type="submit" class="btn">Update credentials</button>
+  <button type="submit" class="btn">Update sign-in</button>
 </form>
 
 <section class="card">
-  <h2>Session</h2>
-  <p class="muted">
-    Sessions last {{.Data.SessionDays}} days. Rotating <code>SESSION_SECRET</code>
-    signs you out everywhere.
-  </p>
+  <div class="row">
+    <h2>Session</h2>
+    <span class="pill pill-idle">{{.Data.Provider}}</span>
+  </div>
+  <p class="muted">Sessions last {{.Data.SessionDays}} days and survive a deploy.</p>
   <form method="post" action="/logout">
     <button type="submit" class="btn btn-danger">Sign out</button>
   </form>

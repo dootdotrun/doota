@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,6 +29,12 @@ type messageView struct {
 	Interrupted bool
 	At          string
 
+	// HTML is Content rendered as markdown, and is set only for the model's own
+	// prose. A user turn keeps Content and renders as preformatted text: the person
+	// typing knows what they wrote, and silently reinterpreting a line that happens
+	// to start with a `#` or a `-` is a worse surprise than not formatting it.
+	HTML template.HTML
+
 	// Tool-result fields.
 	Tool    string
 	Diff    *diffView
@@ -38,7 +45,7 @@ type messageView struct {
 
 type reviewView struct {
 	Clean    bool
-	Findings string
+	Findings template.HTML
 }
 
 // diffView is a rendered file change.
@@ -65,6 +72,39 @@ type chatData struct {
 	Ready          bool
 	Blocked        string
 	Model          string
+
+	// Plan is the task board, rendered on this screen rather than its own.
+	//
+	// It used to be a separate tab, which meant the single most common interruption
+	// — the agent stopping to ask whether a plan is right — was a decision you had
+	// to leave the conversation to make. It is nil when there is no plan.
+	Plan *planView
+
+	// Setup names credentials that are not configured yet. Rendered as one line
+	// with a link, because a fresh install otherwise looks broken rather than
+	// unconfigured.
+	Setup []string
+}
+
+// sandboxBlockedMessage explains an unready sandbox in a sentence.
+//
+// Written per status rather than interpolated, because the interpolated version
+// produced "The sandbox is error." — and the four cases do not want the same
+// sentence anyway: two of them are fixed by waiting and two need a button on the
+// Project screen.
+func sandboxBlockedMessage(status string) string {
+	switch status {
+	case store.SandboxProvisioning:
+		return "The sandbox is still being set up. I can talk, but tools that touch it will fail until it is ready."
+	case store.SandboxSleeping:
+		return "The sandbox is asleep. Anything I run will wake it, which takes a moment."
+	case store.SandboxError:
+		return "The sandbox failed to set up. Check the setup log on the Project screen, then recreate it."
+	case store.SandboxMissing:
+		return "The sandbox no longer exists. Recreate it on the Project screen."
+	default:
+		return "The sandbox is not ready. I can talk, but tools that touch it will fail."
+	}
 }
 
 func (d chatData) Busy() bool { return d.Run != nil && d.Run.State == store.RunRunning }
@@ -77,7 +117,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := s.store.LoadConfig(r.Context())
 	if err == nil {
-		d.Model = cfg.String("model.name")
+		d.Model = cfg.Text(store.KeyModelName)
+		d.Setup = cfg.MissingCredentials()
 	}
 
 	p, err := s.projects.Active(r.Context())
@@ -109,8 +150,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("chat: load run", "error", runErr)
 		}
 		if !p.IsReady() {
-			d.Blocked = fmt.Sprintf("The sandbox is %s. I can talk, but tools that touch it will fail.", p.SandboxStatus)
+			d.Blocked = sandboxBlockedMessage(p.SandboxStatus)
 		}
+
+		d.Plan = s.loadPlan(r, p, d.Run)
 
 		msgs, err := s.store.TranscriptMessages(r.Context(), p.ID, transcriptLimit)
 		if err != nil {
@@ -159,7 +202,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if run, runErr := s.agent.ActiveRun(r.Context(), p.ID); runErr == nil && run.State == store.RunAwaitingHuman && run.Awaiting() == store.AwaitingPlanApproval {
-		http.Redirect(w, r, "/plan?notice="+urlQueryEscape("Approve or reject the plan before sending another task."), http.StatusSeeOther)
+		s.redirectChat(w, r, "Approve or reject the plan before sending another task.", "")
 		return
 	}
 
@@ -214,7 +257,7 @@ func (s *Server) handleChatResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if run.State == store.RunAwaitingHuman && run.Awaiting() == store.AwaitingPlanApproval {
-		http.Redirect(w, r, "/plan?notice="+urlQueryEscape("Approve or reject the plan on this screen before any work starts."), http.StatusSeeOther)
+		s.redirectChat(w, r, "Approve or reject the plan on this screen before any work starts.", "")
 		return
 	}
 	if err := s.agent.Resume(r.Context(), p.ID); err != nil {
@@ -300,6 +343,11 @@ func renderMessages(msgs []*store.Message) []messageView {
 			v.Summary, v.IsError = summariseToolResult(m)
 			v.Diff = extractDiff(m)
 			v.Review = extractReview(m)
+		} else if m.Role != store.RoleUser {
+			// Everything the model wrote — assistant prose, a question from ask_human,
+			// a notice the loop emitted — is markdown. A tool result is not: it is
+			// command output, and belongs in a <pre> exactly as it arrived.
+			v.HTML = renderMarkdown(m.Content)
 		}
 
 		out = append(out, v)
@@ -408,7 +456,9 @@ func extractReview(m *store.Message) *reviewView {
 	if display.Findings == "" {
 		return nil
 	}
-	return &reviewView{Clean: display.Clean, Findings: display.Findings}
+	// Review findings are prose from the reviewer model, which writes them as a
+	// markdown list with file references in backticks.
+	return &reviewView{Clean: display.Clean, Findings: renderMarkdown(display.Findings)}
 }
 
 // clip keeps a compact one-line tool summary from consuming the transcript.

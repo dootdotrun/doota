@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openai/openai-go"
@@ -112,7 +113,16 @@ type Usage struct {
 func (u Usage) TotalTokens() int { return u.PromptTokens + u.CompletionTokens }
 
 // Request is one model call.
+//
+// APIKey and BaseURL travel with the request rather than being fixed when the
+// Client is built. They are configuration, editable on the Settings screen, and a
+// client that captured them at boot meant an operator could paste a corrected key
+// into the form and watch every subsequent call keep using the old one. Client
+// caches the underlying SDK client so passing them per call costs nothing until
+// they actually change.
 type Request struct {
+	APIKey    string
+	BaseURL   string
 	Model     string
 	System    string
 	Messages  []Message
@@ -195,9 +205,19 @@ func (h Handler) toolCall(name string) {
 }
 
 // Client is a model endpoint.
+//
+// The SDK client underneath is built lazily from the credentials on the first
+// request and reused until they change, so the common case is one construction
+// for the life of the process and an edit in Settings takes effect on the next
+// call without a restart.
 type Client struct {
-	api openai.Client
 	log *slog.Logger
+
+	mu      sync.Mutex
+	api     openai.Client
+	apiKey  string
+	baseURL string
+	built   bool
 }
 
 // New builds a client for an OpenAI-compatible endpoint.
@@ -205,12 +225,32 @@ type Client struct {
 // The SDK's own retry handling is left at its default. Proper backoff with jitter
 // across the whole loop is Phase 5's job, and stacking a bespoke retry on top of
 // an SDK retry now would make the eventual attempt budget hard to reason about.
-func New(apiKey, baseURL string, log *slog.Logger) *Client {
+func New(log *slog.Logger) *Client {
+	return &Client{log: log}
+}
+
+// resolve returns an SDK client for these credentials, rebuilding only when they
+// differ from the cached pair.
+func (c *Client) resolve(apiKey, baseURL string) openai.Client {
+	apiKey = strings.TrimSpace(apiKey)
+	baseURL = strings.TrimSpace(baseURL)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.built && c.apiKey == apiKey && c.baseURL == baseURL {
+		return c.api
+	}
+
 	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
-	if strings.TrimSpace(baseURL) != "" {
+	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))
 	}
-	return &Client{api: openai.NewClient(opts...), log: log}
+	c.api = openai.NewClient(opts...)
+	c.apiKey, c.baseURL, c.built = apiKey, baseURL, true
+	if c.log != nil {
+		c.log.Info("model client built", "base_url", baseURL)
+	}
+	return c.api
 }
 
 // streamTimeout bounds a single model call.
@@ -229,17 +269,25 @@ func (c *Client) Stream(ctx context.Context, req Request, h Handler) (*Response,
 	if strings.TrimSpace(req.Model) == "" {
 		return nil, fmt.Errorf("model name is empty")
 	}
+	// Checked here rather than left to the endpoint, because a missing key comes
+	// back as an opaque 401 and this is the single most likely thing to be wrong on
+	// a fresh install.
+	if strings.TrimSpace(req.APIKey) == "" {
+		return nil, fmt.Errorf("no model API key is configured: set one on the Settings screen")
+	}
 
 	params, err := c.params(req)
 	if err != nil {
 		return nil, err
 	}
 
+	api := c.resolve(req.APIKey, req.BaseURL)
+
 	ctx, cancel := context.WithTimeout(ctx, streamTimeout)
 	defer cancel()
 
 	started := time.Now()
-	stream := c.api.Chat.Completions.NewStreaming(ctx, params)
+	stream := api.Chat.Completions.NewStreaming(ctx, params)
 	defer stream.Close()
 
 	h.start()

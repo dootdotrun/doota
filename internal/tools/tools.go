@@ -76,8 +76,13 @@ type Env struct {
 	Project *store.Project
 	Sandbox sandbox.Sandbox
 	Store   *store.Store
-	Config  store.AppConfig
 	Log     *slog.Logger
+
+	// There is deliberately no Config field. It used to carry the whole app_config
+	// snapshot, unread by every tool in the registry, and once credentials moved
+	// into that table the field meant handing every tool the model key, the Sprites
+	// token, the PAT, and the cookie signing secret for no reason at all. A tool
+	// that needs a setting should be given that setting.
 
 	// RunID is "" for a call made outside a run. The durable run type arrives in
 	// Phase 5; until then the id is all the tool layer needs, and it is what
@@ -95,12 +100,12 @@ type Env struct {
 	BaseCommit string
 
 	// GitHubToken authenticates pull request creation against GitHub's REST API.
-	// The same PAT
-	// is installed in the sandbox during provisioning for git clone, fetch, and
-	// push, so there is one credential behind every GitHub operation.
+	// The same PAT is installed in the sandbox during provisioning for git clone,
+	// fetch, and push, so there is one credential behind every GitHub operation.
 	//
-	// Passed through Env rather than read from Config because it is a secret, and
-	// app_config is rendered on the Settings screen.
+	// Named explicitly rather than left for a tool to fish out of a configuration
+	// snapshot: this is the one credential the tool layer is entitled to, and
+	// passing it by name is what keeps the others out of reach.
 	GitHubToken string
 
 	// Emit streams progress to the UI mid-execution. Nil when nothing is

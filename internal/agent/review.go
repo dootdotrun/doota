@@ -84,7 +84,8 @@ func (s *Service) runReview(ctx context.Context, p *store.Project, cfg store.App
 	for turn := 0; turn < reviewerMaxTurns; turn++ {
 		callCtx, cancel := context.WithTimeout(ctx, modelTimeout)
 		resp, callErr := s.streamWithRetry(callCtx, model.Request{
-			Model: cfg.String("model.name"), System: reviewerSystem, Messages: history,
+			APIKey: cfg.Secret(store.KeyModelAPIKey), BaseURL: cfg.Text(store.KeyModelBaseURL),
+			Model: cfg.Text(store.KeyModelName), System: reviewerSystem, Messages: history,
 			Tools: toolSpecs(s.reviewer), MaxTokens: cfg.Int("model.max_output_tokens"),
 		}, model.Handler{})
 		cancel()

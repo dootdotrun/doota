@@ -83,21 +83,17 @@ type Service struct {
 	hub      *events.Hub
 	log      *slog.Logger
 
-	// githubToken reaches pull request creation through tools.Env. Not in
-	// app_config, because that is rendered on the Settings screen.
-	githubToken string
-
 	mu      sync.Mutex
 	workers map[string]*worker // keyed by run id
 	wg      sync.WaitGroup
 }
 
 func New(st *store.Store, projects *project.Service, client *model.Client,
-	registry, reviewer *tools.Registry, hub *events.Hub, githubToken string, log *slog.Logger) *Service {
+	registry, reviewer *tools.Registry, hub *events.Hub, log *slog.Logger) *Service {
 	return &Service{
 		store: st, projects: projects, model: client, tools: registry, reviewer: reviewer,
 		shipping: tools.Shipping(),
-		hub:      hub, log: log, githubToken: githubToken,
+		hub:      hub, log: log,
 		workers: map[string]*worker{},
 	}
 }
@@ -283,7 +279,8 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		return false, err
 	}
 	req := model.Request{
-		Model: cfg.String("model.name"), System: system, Messages: toModelMessages(history),
+		APIKey: cfg.Secret(store.KeyModelAPIKey), BaseURL: cfg.Text(store.KeyModelBaseURL),
+		Model: cfg.Text(store.KeyModelName), System: system, Messages: toModelMessages(history),
 		Tools: toolSpecs(s.tools), MaxTokens: cfg.Int("model.max_output_tokens"),
 	}
 
@@ -652,9 +649,11 @@ func (s *Service) streamWithRetry(ctx context.Context, req model.Request, handle
 func (s *Service) env(p *store.Project, sb sandbox.Sandbox, cfg store.AppConfig,
 	runID string, messageID int64, baseCommit string) *tools.Env {
 	return &tools.Env{
-		Project: p, Sandbox: sb, Store: s.store, Config: cfg, Log: s.log,
+		Project: p, Sandbox: sb, Store: s.store, Log: s.log,
 		RunID: runID, MessageID: messageID, BaseCommit: baseCommit,
-		GitHubToken: s.githubToken,
+		// Read from the snapshot the step is already holding, so a token corrected in
+		// Settings applies to the next tool call rather than the next deploy.
+		GitHubToken: cfg.Secret(store.KeyGitHubToken),
 		Emit:        func(ev tools.Event) { s.publishLive(ev.Type, ev) },
 	}
 }

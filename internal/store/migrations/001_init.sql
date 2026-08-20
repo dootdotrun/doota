@@ -29,7 +29,17 @@ CREATE TABLE users (
 );
 
 -- ---------------------------------------------------------------------------
--- app_config: non-secret, runtime-editable configuration
+-- app_config: all runtime-editable configuration, credentials included
+--
+-- Values are stored in plaintext jsonb, and they now include the model API key,
+-- the Fly Sprites token, the GitHub PAT, and the cookie signing key. So anyone
+-- holding DATABASE_URL — or a dump, or a database branch — holds all of them,
+-- and the signing key means they can forge a session as well as read the rest.
+--
+-- Accepted for a single-operator internal tool whose alternative was seven
+-- secrets in a hosting dashboard and a redeploy to correct any of them. It is
+-- recorded here because "non-secret configuration", which is what this comment
+-- used to say, stopped being true.
 -- ---------------------------------------------------------------------------
 CREATE TABLE app_config (
     key        text        PRIMARY KEY,

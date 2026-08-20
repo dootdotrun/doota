@@ -1,5 +1,13 @@
 {{define "content"}}
 
+{{/* Unconfigured credentials look like a broken app unless something says so. */}}
+{{if .Data.Setup}}
+<p class="banner banner-warn">
+  Not configured yet: {{range $i, $m := .Data.Setup}}{{if $i}}, {{end}}<strong>{{$m}}</strong>{{end}}.
+  <a href="/settings">Open Settings</a>
+</p>
+{{end}}
+
 {{if .Data.Run}}
 <div id="agent-bar" class="agent-bar{{if eq .Data.Run.State "idle"}} hidden{{end}}">
   {{if eq .Data.Run.State "running"}}<span class="spinner" aria-hidden="true"></span>{{end}}
@@ -31,15 +39,65 @@
 
 {{if .Data.Blocked}}<p class="banner banner-warn">{{.Data.Blocked}}</p>{{end}}
 
+{{/*
+  The plan, on the same screen as the conversation it belongs to.
+
+  Collapsed to one line — title and progress — because most of the time it is
+  reference, not a decision. It opens to the full task list, and when the agent is
+  waiting for approval the two buttons that answer it are right here.
+*/}}
+{{with .Data.Plan}}
+<section id="plan" class="card plan-strip">
+  <div class="row">
+    <span class="plan-strip-title">{{.Title}}</span>
+    <span class="plan-progress">{{.Done}}/{{.Total}}</span>
+  </div>
+  {{if .Current}}<p class="plan-current"><strong>{{.Current.N}}.</strong> {{.Current.Summary}}</p>{{end}}
+
+  <details class="disclose">
+    <summary>All {{.Total}} tasks{{if .BaseCommit}} · from {{shortID .BaseCommit}}{{end}}</summary>
+    <ul class="task-board">
+      {{range .Tasks}}
+        <li class="task task-{{.Status}}{{if .Current}} task-current{{end}}">
+          <span class="task-n">{{.N}}</span>
+          <span class="task-summary">{{.Summary}}</span>
+          <span class="pill plan-status-{{.Status}}">{{.Status}}</span>
+          {{if .Note}}<p class="help task-note">{{.Note}}</p>{{end}}
+        </li>
+      {{end}}
+    </ul>
+    {{if .DiffURL}}<p class="help"><a href="{{.DiffURL}}">View the diff so far</a></p>{{end}}
+    {{if .Feedback}}<p class="help">Revision requested: {{.Feedback}}</p>{{end}}
+  </details>
+</section>
+
+{{if .CanApprove}}
+<section class="card plan-actions stack">
+  <h2>Approve this plan?</h2>
+  <p class="muted">Approval starts the work from the current commit. Nothing has been changed yet.</p>
+  <form method="post" action="/plan/approve">
+    <button class="btn btn-primary" type="submit">Approve plan</button>
+  </form>
+  <details class="disclose">
+    <summary>Ask for a revision instead</summary>
+    <form method="post" action="/plan/revise" class="stack">
+      <div class="field">
+        <textarea id="feedback" name="feedback" rows="3" placeholder="What should change?" required></textarea>
+      </div>
+      <button class="btn" type="submit">Request a revision</button>
+    </form>
+  </details>
+</section>
+{{end}}
+{{end}}
+
 <div id="transcript" class="transcript" data-last-message-id="{{.Data.LastMessageID}}" data-busy="{{if .Data.Busy}}1{{else}}0{{end}}">
   {{if .Data.Messages}}
     {{template "messages.html" .Data.Messages}}
   {{else}}
     <div class="card">
-      <p class="phase-tag">Phase 6</p>
       <h2>Say something</h2>
-      <p class="muted">Ask about the code or ask for a change. Work is persisted, so a deploy resumes it from the same point.</p>
-      <p class="help">You can pause work, safely redeploy, and answer a focused question when doot needs a decision.</p>
+      <p class="muted">Ask about the code, or ask for a change. Work is persisted, so a deploy resumes it from the same point.</p>
     </div>
   {{end}}
 </div>
@@ -47,12 +105,17 @@
 <div id="streaming" class="turn assistant hidden"><div class="bubble" id="streaming-text"></div></div>
 
 <form id="composer" class="composer" method="post" action="/chat">
-  <textarea id="composer-input" name="message" rows="1" placeholder="{{if and .Data.Run (eq .Data.Run.State "awaiting_human") (eq .Data.Run.AwaitingReason.String "question")}}Reply to continue…{{else}}Message doot…{{end}}"
-            autocapitalize="sentences" autocorrect="on" spellcheck="true" {{if not .Data.CanSend}}disabled{{end}}></textarea>
-  <button type="submit" class="send" aria-label="Send" {{if not .Data.CanSend}}disabled{{end}}>
+  <textarea id="composer-input" name="message" rows="1"
+            placeholder="{{if and .Data.Run (eq .Data.Run.State "awaiting_human") (eq .Data.Run.AwaitingReason.String "question")}}Reply to continue…{{else}}Message doot…{{end}}"
+            autocapitalize="sentences" autocorrect="on" spellcheck="true"
+            enterkeyhint="enter" {{if not .Data.CanSend}}disabled{{end}}></textarea>
+  {{/* The hint is a tooltip rather than visible text: it only matters on a
+       desktop keyboard, and this screen is not the place for a shortcut legend. */}}
+  <button type="submit" class="send" aria-label="Send" title="Send (Ctrl+Enter). Enter adds a new line."
+          {{if not .Data.CanSend}}disabled{{end}}>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4M5 11l7-7 7 7"/></svg>
   </button>
 </form>
 
-<p class="chat-foot help">{{.Data.Model}}</p>
+{{if .Data.Model}}<p class="chat-foot">{{.Data.Model}}</p>{{end}}
 {{end}}
