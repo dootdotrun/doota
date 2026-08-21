@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,41 +66,6 @@ func statusPresentation(status string) (label, class string) {
 	default:
 		return status, "pill-idle"
 	}
-}
-
-func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
-	d, err := s.projectView(r)
-	if errors.Is(err, store.ErrNotFound) {
-		// No project: the create form is the whole screen.
-		s.render(w, r, "project", page{
-			Title:  "Project",
-			Active: "project",
-			Status: "no project",
-			User:   userFrom(r),
-			Notice: r.URL.Query().Get("notice"),
-			Error:  r.URL.Query().Get("error"),
-			Data:   projectData{ProviderKind: s.projects.ProviderKind()},
-		})
-		return
-	}
-	if err != nil {
-		s.log.Error("load project", "error", err)
-		s.render(w, r, "project", page{
-			Title: "Project", Active: "project", User: userFrom(r),
-			Error: "Could not load the project.",
-		})
-		return
-	}
-
-	s.render(w, r, "project", page{
-		Title:  "Project",
-		Active: "project",
-		Status: d.StatusLabel,
-		User:   userFrom(r),
-		Notice: r.URL.Query().Get("notice"),
-		Error:  r.URL.Query().Get("error"),
-		Data:   d,
-	})
 }
 
 // handleProjectStatus returns the status card for htmx polling.
@@ -199,7 +165,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		s.redirectProject(w, r, "", "Could not delete the project: "+err.Error())
 		return
 	}
-	s.redirectProject(w, r, "Project deleted. Its history is still on Activity.", "")
+	s.redirectProject(w, r, "Project deleted. Create another below.", "")
 }
 
 func (s *Server) requireProject(w http.ResponseWriter, r *http.Request) (*store.Project, bool) {
@@ -212,7 +178,7 @@ func (s *Server) requireProject(w http.ResponseWriter, r *http.Request) (*store.
 }
 
 func (s *Server) redirectProject(w http.ResponseWriter, r *http.Request, notice, errMsg string) {
-	target := "/project"
+	target := appPrefix + "/settings"
 	switch {
 	case errMsg != "":
 		target += "?error=" + urlQueryEscape(errMsg)
@@ -222,9 +188,9 @@ func (s *Server) redirectProject(w http.ResponseWriter, r *http.Request, notice,
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
-// handleProjectClearConversation deliberately touches only Postgres transcript
-// state. It never reaches the project service, so sandbox files and processes
-// are unaffected. An active runner is rejected to avoid archiving its live model
+// handleProjectClearConversation deliberately touches only Postgres conversation
+// state. It never reaches the project service, so sandbox files and processes are
+// unaffected. An active runner is rejected to avoid deleting its live model
 // context between an assistant tool request and its tool result.
 func (s *Server) handleProjectClearConversation(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.requireProject(w, r)
@@ -232,30 +198,44 @@ func (s *Server) handleProjectClearConversation(w http.ResponseWriter, r *http.R
 		return
 	}
 	if _, err := s.agent.ActiveRun(r.Context(), p.ID); err == nil {
-		s.redirectProject(w, r, "", "Pause or finish the active run before clearing its conversation.")
+		s.redirectChat(w, r, "", "Pause or finish the active run before clearing its conversation.")
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
-		s.redirectProject(w, r, "", "Could not check the active run: "+err.Error())
+		s.redirectChat(w, r, "", "Could not check the active run: "+err.Error())
 		return
 	}
-	archived, err := s.store.ClearConversation(r.Context(), p.ID)
+
+	counts, err := s.store.ClearConversation(r.Context(), p.ID)
 	if errors.Is(err, store.ErrActiveRun) {
-		s.redirectProject(w, r, "", "Pause or finish the active run before clearing its conversation.")
-		return
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		s.redirectProject(w, r, "There is no live conversation to clear.", "")
+		s.redirectChat(w, r, "", "Pause or finish the active run before clearing its conversation.")
 		return
 	}
 	if err != nil {
 		s.log.Error("clear conversation", "error", err)
-		s.redirectProject(w, r, "", "Could not archive the conversation: "+err.Error())
+		s.redirectChat(w, r, "", "Could not clear the conversation: "+err.Error())
 		return
 	}
-	if event, eventErr := s.store.AppendEvent(r.Context(), p.ID, "", store.EventConversationCleared, map[string]any{"message_count": archived}); eventErr == nil {
+	if counts.Empty() {
+		s.redirectChat(w, r, "There was nothing to clear.", "")
+		return
+	}
+
+	s.log.Info("conversation cleared",
+		"messages", counts.Messages, "runs", counts.Runs,
+		"tool_calls", counts.ToolCalls, "events", counts.Events)
+
+	// Recorded after the delete, so this row is the first in a table the clear just
+	// emptied. It is also what tells an open Chat screen to reload.
+	if event, eventErr := s.store.AppendEvent(r.Context(), p.ID, "", store.EventConversationCleared,
+		map[string]any{"message_count": counts.Messages, "run_count": counts.Runs}); eventErr == nil {
 		s.events.Publish(events.Frame{ID: event.ID, Type: event.Type, Data: event.Payload})
 	} else {
 		s.log.Error("record cleared conversation event", "error", eventErr)
 	}
-	s.redirectProject(w, r, "Archived "+strconv.Itoa(archived)+" messages. The sandbox was not changed.", "")
+
+	// Back to Chat, not Settings: clearing is reachable from the header on every
+	// screen, and the result of the action is the empty conversation.
+	s.redirectChat(w, r, fmt.Sprintf(
+		"Deleted %d messages and %d runs. The sandbox was not touched.",
+		counts.Messages, counts.Runs), "")
 }

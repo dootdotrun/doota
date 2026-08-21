@@ -45,6 +45,15 @@ const (
 	StateThinking = "thinking"
 	StateWorking  = "working"
 	StateError    = "error"
+
+	// StateDone marks a run that reached a terminal state on purpose, as opposed
+	// to one that was paused, errored, or never started.
+	//
+	// It exists because "idle" was doing both jobs and the UI renders idle as the
+	// absence of a bar. Finishing therefore looked exactly like nothing having
+	// happened, which is the whole of "the agent completes the task but there is
+	// no visual clarity that it is done".
+	StateDone = "done"
 )
 
 // ErrBusy is returned when a run is already active for the project.
@@ -349,7 +358,7 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 			return false, err
 		}
 		s.publishRun(ctx, finished)
-		s.setState(ctx, r.ProjectID, r.ID, StateIdle, "")
+		s.setState(ctx, r.ProjectID, r.ID, StateDone, "")
 		return false, nil
 	}
 
@@ -592,7 +601,7 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 		pr = tools.Result{Content: "Could not open a pull request after the successful push: " + err.Error(), IsError: true}
 	}
 
-	content := fmt.Sprintf("Shipped `%s`.\n\n%s\n\nPreview: /preview/", store.WorkBranch, request.Summary)
+	content := fmt.Sprintf("Shipped `%s`.\n\n%s\n\nPreview: /", store.WorkBranch, request.Summary)
 	if pr.IsError {
 		content += "\n\nNo pull request was opened, but the push succeeded: " + pr.Content
 	} else {
@@ -602,8 +611,13 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 	if err := s.store.ClearPlan(ctx, p.ID); err != nil {
 		return nil, nil, err
 	}
+	// shipped marks this as the one done result that actually shipped. The three
+	// earlier returns above also produce a done-named tool message — a dirty
+	// worktree, an unreviewed diff, a failed push — and without an explicit flag the
+	// UI could only tell them apart by guessing at which keys happened to be
+	// present, which it got wrong and reported all four as a success.
 	msg, err := s.store.AppendMessage(ctx, in(content, map[string]any{
-		"summary": request.Summary, "preview_url": "/preview/",
+		"summary": request.Summary, "shipped": true, "preview_url": "/",
 		"push": push.Display, "pull_request": pr.Display, "pr_error": pr.IsError}))
 	if err != nil {
 		return nil, nil, err
@@ -612,6 +626,10 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 	if err != nil {
 		return nil, nil, err
 	}
+	// Every other terminal path announces itself; this one did not. Without it the
+	// spinner kept reading "working · done" until a reload arrived, and that reload
+	// is deferred for as long as the composer holds text or focus.
+	s.setState(ctx, r.ProjectID, r.ID, StateDone, "shipped")
 	return msg, finished, nil
 }
 

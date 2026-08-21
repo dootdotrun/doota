@@ -4,16 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sign in · doot</title>
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="manifest" href="{{app "/manifest.webmanifest"}}">
 <meta name="theme-color" content="#ffffff">
 <meta name="color-scheme" content="light">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="doot">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<link rel="icon" href="/static/icon-192.png">
-<link rel="apple-touch-icon" href="/static/icon-192.png">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="{{app "/static/icon-192.png"}}">
+<link rel="apple-touch-icon" href="{{app "/static/icon-192.png"}}">
+<link rel="stylesheet" href="{{app "/static/app.css"}}">
 </head>
 <body class="centered">
 
@@ -23,7 +23,7 @@
 
   {{if .Error}}<p class="banner banner-err">{{.Error}}</p>{{end}}
 
-  <form method="post" action="/login" class="stack">
+  <form method="post" action="{{app "/login"}}" class="stack">
     <div class="field">
       <label for="username">Username</label>
       <input id="username" name="username" type="text"

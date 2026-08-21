@@ -273,8 +273,8 @@ func (exposePortTool) Execute(ctx context.Context, in json.RawMessage, env *Env)
 	p.PreviewPort = args.Port
 
 	return Result{
-		Content: fmt.Sprintf("Preview port set to %d. The operator can open it at /preview/ "+
+		Content: fmt.Sprintf("Preview port set to %d. The operator can open it at / "+
 			"and it is proxied to this port inside the sandbox.", args.Port),
-		Display: map[string]any{"port": args.Port, "url": "/preview/"},
+		Display: map[string]any{"port": args.Port, "url": "/"},
 	}, nil
 }

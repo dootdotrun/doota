@@ -44,9 +44,21 @@ approach and reporting only the success.`
 //
 // The Sprite filesystem persists indefinitely, so this is a one-time cost rather
 // than something re-run on every wake.
-const DefaultSetupScript = `#!/usr/bin/env bash
+//
+// POSIX sh only, and deliberately so. provision.go executes this as
+// `sh /tmp/doot-setup.sh`, which ignores the shebang entirely, and the sandbox
+// image's /bin/sh is dash. Bash arrays and `set -o pipefail` are parse errors
+// there, and dash aborts the whole file on a parse error rather than the line —
+// so a single bash-ism near the top silently skips every install below it. That
+// failure is close to invisible: provisioning continues, the clone succeeds, and
+// the only symptom is that `search` finds nothing because ripgrep was never
+// installed. This script had that bug; keep it POSIX.
+const DefaultSetupScript = `#!/bin/sh
 # Runs once at project creation. The filesystem persists, so this is not re-run.
-set -euo pipefail
+#
+# POSIX sh only: this is run by dash, where bash arrays are a syntax error that
+# aborts the entire script.
+set -eu
 
 # Sprites run commands as an unprivileged "sprite" user with passwordless sudo, so
 # package installs need escalating. Root is still handled, since the local provider
@@ -78,26 +90,56 @@ install_pkgs() {
 # command it installs - ripgrep provides "rg", and ca-certificates provides no
 # binary at all. Checking the package name instead means the probe never succeeds
 # and apt runs on every provision, which this setup is supposed to do once.
-need=()
+#
+# A space-separated string rather than an array: word splitting is exactly the
+# behaviour wanted at the call site, and unlike an array it is portable.
+need=""
 for pair in git:git curl:curl rg:ripgrep; do
-  bin="${pair%%:*}"
-  pkg="${pair#*:}"
-  command -v "${bin}" >/dev/null 2>&1 || need+=("${pkg}")
+  bin=${pair%%:*}
+  pkg=${pair#*:}
+  command -v "${bin}" >/dev/null 2>&1 || need="${need} ${pkg}"
 done
 # No binary to probe for, so ask the package manager whether it is already there.
 if command -v dpkg >/dev/null 2>&1; then
-  dpkg -s ca-certificates >/dev/null 2>&1 || need+=(ca-certificates)
+  dpkg -s ca-certificates >/dev/null 2>&1 || need="${need} ca-certificates"
 fi
-if [ "${#need[@]}" -gt 0 ]; then
-  echo "installing: ${need[*]}"
-  install_pkgs "${need[@]}" || echo "warning: some packages were not installed"
+if [ -n "${need}" ]; then
+  echo "installing:${need}"
+  # Unquoted on purpose: these are package names from the fixed list above, and
+  # splitting them into separate arguments is the point.
+  # shellcheck disable=SC2086
+  install_pkgs ${need} || echo "warning: some packages were not installed"
 else
   echo "toolchain already present"
 fi
 
 mkdir -p /tmp/doot-logs
 
+# Report each tool separately rather than through a pipeline. Without pipefail a
+# missing binary produces an empty string instead of "missing", which reads as
+# success in the provision log.
 echo "setup complete"
-echo "git: $(git --version 2>/dev/null || echo missing)"
-echo "rg:  $(rg --version 2>/dev/null | head -1 || echo missing)"
+if command -v git >/dev/null 2>&1; then
+  echo "git:  $(git --version)"
+else
+  echo "git:  MISSING - clone, commit, and push will all fail"
+fi
+if command -v rg >/dev/null 2>&1; then
+  echo "rg:   $(rg --version | head -1)"
+else
+  echo "rg:   MISSING - the search tool has no fallback and will return nothing"
+fi
+if command -v curl >/dev/null 2>&1; then
+  echo "curl: $(curl --version | head -1)"
+else
+  echo "curl: MISSING"
+fi
+# No binary to check, so ask the package manager where there is one to ask.
+if command -v dpkg >/dev/null 2>&1; then
+  if dpkg -s ca-certificates >/dev/null 2>&1; then
+    echo "ca-certificates: present"
+  else
+    echo "ca-certificates: MISSING - HTTPS to github and the model API may fail"
+  fi
+fi
 `

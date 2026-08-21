@@ -90,6 +90,20 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	return &r, nil
 }
 
+// LatestRun returns the most recent run whatever its state, finished ones
+// included.
+//
+// ActiveRun deliberately excludes idle and done, which is right for deciding
+// whether work is in flight and wrong for showing what happened. With only
+// ActiveRun to ask, the moment a run finished the Chat screen saw no run at all
+// and printed the same "idle" chip a project that had never been used would
+// print — so a completed task was indistinguishable from one never started. This
+// is how the screen can say "finished" or "shipped" instead.
+func (s *Store) LatestRun(ctx context.Context, projectID string) (*Run, error) {
+	return scanRun(s.DB.QueryRowContext(ctx, `SELECT `+runColumns+` FROM run
+		WHERE project_id = $1 ORDER BY started_at DESC LIMIT 1`, projectID))
+}
+
 // ActiveRun returns the sole resumable run for a project, if there is one.
 func (s *Store) ActiveRun(ctx context.Context, projectID string) (*Run, error) {
 	return scanRun(s.DB.QueryRowContext(ctx, `SELECT `+runColumns+` FROM run

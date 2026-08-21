@@ -12,6 +12,30 @@
       <div class="review-findings prose">{{.Review.Findings}}</div>
     </section>
 
+  {{else if .Ship}}
+    {{/*
+      The one tool result rendered open, and only when done actually shipped —
+      .Ship is nil for the three refusals that also produce a done-named message.
+      This is the end of the task: the summary, the pull request, and the preview
+      are the payoff, and collapsing them behind a disclosure triangle was most of
+      why finishing had no visible moment.
+    */}}
+    <section class="turn shipped-card" data-message-id="{{.ID}}">
+      <div class="review-head">
+        <strong>Task shipped</strong>
+        <span class="pill pill-ok">done</span>
+      </div>
+      <div class="prose">{{.HTML}}</div>
+      {{with .Ship}}
+        {{if or .PRURL .PreviewURL}}
+          <div class="btn-row shipped-links">
+            {{if .PRURL}}<a class="btn btn-small" href="{{.PRURL}}" target="_blank" rel="noopener">Pull request</a>{{end}}
+            {{if .PreviewURL}}<a class="btn btn-small" href="{{.PreviewURL}}" target="_blank" rel="noopener">Live preview</a>{{end}}
+          </div>
+        {{end}}
+      {{end}}
+    </section>
+
   {{else if eq .Role "tool"}}
     <details class="turn tool" data-message-id="{{.ID}}">
       <summary>

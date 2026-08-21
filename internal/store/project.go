@@ -113,10 +113,6 @@ func (s *Store) ProjectByID(ctx context.Context, id string) (*Project, error) {
 		`SELECT `+projectColumns+` FROM project WHERE id = $1`, id))
 }
 
-func (s *Store) MostRecentProject(ctx context.Context) (*Project, error) {
-	return scanProject(s.DB.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM project ORDER BY created_at DESC LIMIT 1`))
-}
-
 // SetSandbox records the provisioned sandbox name.
 //
 // Called immediately after the sandbox is created and before any further setup:

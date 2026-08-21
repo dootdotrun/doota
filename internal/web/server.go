@@ -1,4 +1,4 @@
-// Package web serves the five screens and the actions behind them.
+// Package web serves the screens and the actions behind them.
 //
 // Server-rendered HTML with htmx for partial updates. No JSON API: the only
 // consumer is the app's own HTML.
@@ -33,6 +33,31 @@ var staticFS embed.FS
 // sessionTTL is deliberately long. Re-authenticating a personal tool on a phone
 // every few hours is friction with no threat model behind it.
 const sessionTTL = 30 * 24 * time.Hour
+
+// appPrefix is where the doot UI lives. Everything outside it belongs to the
+// preview proxy.
+//
+// This inverts the original arrangement, where the UI owned the root and the
+// preview was mounted at /preview. That way round, two problems had no fix:
+//
+//   - The previewed app's own URLs were wrong. A dev server serving
+//     `<script src="/assets/app.js">`, calling `fetch("/api/thing")`, pushing
+//     /dashboard through the history API, or setting a cookie with Path=/ emits
+//     root-absolute URLs, and nothing rewrites a response body on the way back.
+//     The browser asked doot for those paths, and doot answered with its own 404
+//     or a redirect to its login screen. Serving the preview from the root makes
+//     every one of them correct by construction, with no body rewriting, no
+//     X-Forwarded-Prefix for the framework to honour, and no Referer guessing.
+//   - The preview could not escape the installed PWA. Navigations inside the
+//     manifest's scope open in the app's own chrome-less window, which has no
+//     back affordance, and /preview was inside a scope of "/". With the UI under
+//     /app the manifest scopes to /app/, so the preview is out of scope and opens
+//     in a real browser tab.
+//
+// The cost is that a previewed path beginning /app is unreachable. For one
+// operator previewing their own dev server that is a fair trade, and it is the
+// only path that is shadowed.
+const appPrefix = "/app"
 
 // Server holds the HTTP layer's dependencies.
 type Server struct {
@@ -70,11 +95,16 @@ func New(st *store.Store, projects *project.Service,
 }
 
 // standalone pages render their own complete document; the rest are wrapped in
-// the app shell with the tab bar.
+// the app shell.
 var standalonePages = map[string]bool{"login": true}
 
 // templateFuncs are available to every template.
 var templateFuncs = template.FuncMap{
+	// app prefixes a UI path with the mount point, so appPrefix is the only place
+	// "/app" is written. The templates used to hand-copy it about thirty times,
+	// which made changing the constant compile cleanly and produce a broken UI.
+	"app": func(path string) string { return appPrefix + path },
+
 	// shortID trims an identifier for display without hiding it entirely.
 	"shortID": func(s string) string {
 		if len(s) > 12 {
@@ -85,7 +115,7 @@ var templateFuncs = template.FuncMap{
 }
 
 func parseTemplates() (pages, fragments map[string]*template.Template, err error) {
-	pageNames := []string{"login", "chat", "project", "activity", "settings"}
+	pageNames := []string{"login", "chat", "settings"}
 	pages = make(map[string]*template.Template, len(pageNames))
 
 	for _, name := range pageNames {
@@ -125,70 +155,96 @@ func (s *Server) Handler() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(s.requestLogger)
 
-	// Unauthenticated.
-	r.Get("/healthz", s.handleHealthz)
-	r.Get("/login", s.handleLoginForm)
-	r.Post("/login", s.handleLogin)
-	r.Post("/logout", s.handleLogout)
+	// Outside the app prefix and outside the session, so Fly's health check does
+	// not depend on the UI's routing or on being logged in. It is also the one path
+	// the preview cannot have, which is why it is a single well-known word.
+	//
+	// Registered for every method, not just GET: with only Get here, a POST to
+	// /healthz fell through to the preview catch-all, so the path was reserved for
+	// one verb and forwarded for the rest.
+	r.Handle("/healthz", http.HandlerFunc(s.handleHealthz))
 
-	sub, err := fs.Sub(staticFS, "static")
-	if err != nil {
-		panic(fmt.Sprintf("static assets: %v", err))
-	}
-	fileServer := http.StripPrefix("/static/", http.FileServer(http.FS(sub)))
-	r.Handle("/static/*", cacheStatic(fileServer))
-
-	// Served from the root so their scope covers the whole origin.
-	// The manifest is served from the root so an installed home-screen app scopes
-	// to the whole origin. There is no service worker: the one that used to live
-	// here cached seven static assets that already carry a one-hour Cache-Control
-	// and, by its own comment, provided no offline mode — so it bought a versioned
-	// cache to invalidate and nothing else. The manifest alone gives the icon.
+	// The manifest also stays at the origin root, unauthenticated.
+	//
+	// It is served from /app/ as well, which is the copy that matters because scope
+	// is resolved relative to the manifest's own URL. This one exists for installs
+	// made before the move: a browser re-fetches the manifest from the URL recorded
+	// at install time, and without this that URL now answers with the preview proxy,
+	// so an already-installed app could never learn its scope had changed.
 	r.Get("/manifest.webmanifest", s.serveStaticFile("manifest.webmanifest", "application/manifest+json"))
 
-	// Authenticated: the five screens and their actions.
+	r.Route(appPrefix, func(r chi.Router) {
+		// Unauthenticated.
+		r.Get("/login", s.handleLoginForm)
+		r.Post("/login", s.handleLogin)
+		r.Post("/logout", s.handleLogout)
+
+		sub, err := fs.Sub(staticFS, "static")
+		if err != nil {
+			panic(fmt.Sprintf("static assets: %v", err))
+		}
+		fileServer := http.StripPrefix(appPrefix+"/static/", http.FileServer(http.FS(sub)))
+		r.Handle("/static/*", cacheStatic(fileServer))
+
+		// Served from inside the prefix, because the manifest's scope is resolved
+		// relative to the manifest's own URL and the whole point of the prefix is
+		// that the installed app scopes to /app/ rather than the whole origin.
+		//
+		// There is no service worker: the one that used to live here cached seven
+		// static assets that already carry a one-hour Cache-Control and, by its own
+		// comment, provided no offline mode — so it bought a versioned cache to
+		// invalidate and nothing else. The manifest alone gives the icon.
+		r.Get("/manifest.webmanifest", s.serveStaticFile("manifest.webmanifest", "application/manifest+json"))
+
+		// Authenticated: the screens and their actions.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAuth)
+
+			r.Get("/", s.handleChat)
+			r.Post("/chat", s.handleChatSend)
+			r.Post("/chat/pause", s.handleChatPause)
+			r.Post("/chat/resume", s.handleChatResume)
+			r.Get("/chat/tail", s.handleChatTail)
+
+			// The live stream.
+			r.Get("/events", s.handleEvents)
+
+			// The plan is rendered on the Chat screen. This redirect exists so an
+			// installed home-screen shortcut or a bookmark to the old tab still
+			// lands somewhere useful.
+			r.Get("/plan", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, appPrefix+"/#plan", http.StatusMovedPermanently)
+			})
+			r.Post("/plan/approve", s.handlePlanApprove)
+			r.Post("/plan/revise", s.handlePlanRevise)
+			r.Get("/plan/diff", s.handlePlanDiff)
+			r.Get("/settings", s.handleSettings)
+
+			r.Post("/settings/config", s.handleSaveConfig)
+			r.Post("/settings/config/reset", s.handleResetConfigField)
+			r.Post("/settings/credentials", s.handleSaveCredentials)
+
+			r.Get("/project/status", s.handleProjectStatus)
+			r.Post("/project", s.handleCreateProject)
+			r.Post("/project/wake", s.handleProjectWake)
+			r.Post("/project/recreate", s.handleProjectRecreate)
+
+			r.Post("/project/preview-port", s.handleProjectPreviewPort)
+			r.Post("/project/clear-conversation", s.handleProjectClearConversation)
+			r.Post("/project/delete", s.handleProjectDelete)
+		})
+	})
+
+	// Everything else is the preview.
+	//
+	// Behind the same session as the UI, which is the entire reason it is proxied
+	// rather than exposed as the sandbox's own public URL: there is no secret URL
+	// to leak and no provider token in the browser. Registered for every method,
+	// because a previewed app has forms and API calls, not just GETs.
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
-
-		r.Get("/", s.handleChat)
-		r.Post("/chat", s.handleChatSend)
-		r.Post("/chat/pause", s.handleChatPause)
-		r.Post("/chat/resume", s.handleChatResume)
-		r.Get("/chat/tail", s.handleChatTail)
-
-		// The live stream. Excluded from the service worker, which would otherwise
-		// buffer it into uselessness.
-		r.Get("/events", s.handleEvents)
-
-		// The plan is rendered on the Chat screen. This redirect exists so an
-		// installed home-screen shortcut or a bookmark to the old tab still lands
-		// somewhere useful.
-		r.Get("/plan", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/#plan", http.StatusMovedPermanently)
-		})
-		r.Post("/plan/approve", s.handlePlanApprove)
-		r.Post("/plan/revise", s.handlePlanRevise)
-		r.Get("/plan/diff", s.handlePlanDiff)
-		r.Get("/project", s.handleProject)
-		r.Get("/activity", s.handleActivity)
-		r.Get("/settings", s.handleSettings)
-
-		r.Post("/settings/config", s.handleSaveConfig)
-		r.Post("/settings/credentials", s.handleSaveCredentials)
-
-		r.Get("/project/status", s.handleProjectStatus)
-		r.Post("/project", s.handleCreateProject)
-		r.Post("/project/wake", s.handleProjectWake)
-		r.Post("/project/recreate", s.handleProjectRecreate)
-
-		r.Post("/project/preview-port", s.handleProjectPreviewPort)
-		r.Post("/project/clear-conversation", s.handleProjectClearConversation)
-		r.Post("/project/delete", s.handleProjectDelete)
-
-		// Previews are behind the same session as everything else, which is the
-		// entire reason they are proxied rather than exposed directly.
-		r.Get(previewPrefix, s.handlePreviewRedirect)
-		r.Handle(previewPrefix+"/*", http.HandlerFunc(s.handlePreview))
+		r.Handle("/", http.HandlerFunc(s.handlePreview))
+		r.Handle("/*", http.HandlerFunc(s.handlePreview))
 	})
 
 	return r
