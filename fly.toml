@@ -1,65 +1,29 @@
-# doot — one machine, always on.
+# fly.toml app configuration file generated for doota on 2026-08-21T02:58:15Z
 #
-# Deployed from the Fly.io dashboard: point it at this repository, set one
-# secret, and it builds from the Dockerfile in the repository root. Nothing here
-# assumes flyctl, and there is no release command, no volume, and no build
-# argument to supply.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-#   1. Fly.io dashboard -> Launch an app -> deploy from a GitHub repository.
-#   2. Name the app "doot" (or change the `app` line below to match the name you
-#      chose — the two have to agree or the deploy has no app to target).
-#   3. Set exactly one secret:
-#
-#          DATABASE_URL = postgres://user:pass@host/db?sslmode=require
-#
-#      A Neon connection string, or anything else that speaks Postgres. If you
-#      attach Fly Postgres from the dashboard it sets DATABASE_URL for you and
-#      there is nothing to paste at all.
-#
-#   4. Open the app, sign in with doot / doot, and fill in the Settings screen:
-#      model API key, model endpoint, Fly Sprites token, GitHub token. Change the
-#      password while you are there.
-#
-# Everything in step 4 lives in the database, not here, so changing any of it
-# later is a form submission rather than a redeploy. Auto-deploy on push to the
-# default branch is a checkbox in the dashboard and needs no configuration file.
 
-app = "doota"
-primary_region = "iad"
+app = 'doota'
+primary_region = 'iad'
 
-# Empty on purpose: Fly's remote builder finds ./Dockerfile. No builder image, no
-# buildpack, no local Docker daemon.
 [build]
 
 [http_service]
   internal_port = 8080
   force_https = true
-
-  # Both settings are load-bearing. Fly's default scale-to-zero would suspend
-  # the machine mid-goal; the agent runner has to stay alive. Exactly one
-  # machine: the run lease exists to survive deploy overlap, not to scale out.
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
 
-[[http_service.checks]]
-  interval = "15s"
-  # Longer than the handler's own 5s database ping, so a slow database shows up
-  # as the 503 the handler returns rather than as an ambiguous check timeout.
-  timeout = "6s"
-  grace_period = "10s"
-  method = "GET"
-  path = "/healthz"
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '6s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
-  # The app is a thin coordinator: the heavy work happens inside Sprites and all
-  # state lives in Postgres.
-  cpu_kind = "shared"
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory = "512mb"
-
-# No [mounts]. The machine is stateless by design - nothing on its disk matters.
-#
-# No [deploy] release_command either. Migrations run in-process at startup behind
-# a Postgres advisory lock, so two machines overlapping during a deploy cannot
-# race each other. See internal/store/migrate.go.
+  memory_mb = 512
