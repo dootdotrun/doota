@@ -24,7 +24,7 @@
 # later is a form submission rather than a redeploy. Auto-deploy on push to the
 # default branch is a checkbox in the dashboard and needs no configuration file.
 
-app = "doot"
+app = "doota"
 primary_region = "iad"
 
 # Empty on purpose: Fly's remote builder finds ./Dockerfile. No builder image, no
