@@ -44,7 +44,6 @@
 
   --radius: 9px;
   --radius-sm: 7px;
-  --tabbar-h: 56px;
   --tap: 44px;
 }
 
@@ -61,7 +60,8 @@ body {
   font: 15px/1.5 var(--mono);
   font-variant-ligatures: none;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  /* Header, then content. The third row used to be the tab bar. */
+  grid-template-rows: auto 1fr;
   overscroll-behavior-y: none;
 }
 
@@ -92,10 +92,17 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
   border-bottom: 1px solid var(--border);
 }
 
-.statusbar-title { font-weight: 700; letter-spacing: -0.01em; font-size: 0.95rem; }
+/* A link to Chat now, but still the title: the accent colour and underline every
+   other anchor gets would read as a stray control in the header. */
+.statusbar-title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-size: 0.95rem;
+  color: var(--text);
+  text-decoration: none;
+}
 
 .chip {
-  margin-left: auto;
   font-size: 11px;
   color: var(--muted);
   background: var(--surface-2);
@@ -119,6 +126,19 @@ a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset:
 }
 
 h1, h2, h3 { line-height: 1.25; letter-spacing: -0.01em; }
+
+/* Divides Settings into its two halves: the knobs, then the project. Not a card
+   itself — it labels the cards that follow it. */
+.section-head {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 22px 0 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
 h2 { font-size: 1.02rem; margin: 0 0 6px; font-weight: 700; }
 h3 { font-size: 0.94rem; margin: 0 0 5px; font-weight: 700; }
 
@@ -313,46 +333,48 @@ input:focus, textarea:focus, select:focus {
 .btn-row { display: flex; gap: 8px; }
 .btn-row .btn { width: auto; flex: 1; }
 
-/* ---------- tab bar ---------- */
+/* ---------- header actions ---------- */
 
-/* Three tabs, not five.
-   Plan folded into Chat and Activity folded into Project, because the complaint
-   that produced this layout was having to cross four screens to make one small
-   change. What is left is: the conversation, the thing it works on, and the
-   knobs. Each is one tap from any other, and each tab is now wide enough to hit
-   without aiming. */
-.tabbar {
-  position: sticky;
-  bottom: 0;
-  z-index: 20;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  background: color-mix(in srgb, var(--bg) 94%, transparent);
-  backdrop-filter: blur(10px);
-  border-top: 1px solid var(--border);
-  /* Clear the home indicator. */
-  padding-bottom: env(safe-area-inset-bottom);
+.statusbar-actions {
+  /* Pushes the group to the right edge, which the status chip used to do for
+     itself before it had neighbours. */
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
 }
 
-.tab {
-  display: flex;
-  flex-direction: column;
+.iconbtn {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  min-height: var(--tabbar-h);
-  padding: 6px 2px;
-  text-decoration: none;
+  /* Under the 44px tap target used elsewhere, deliberately: four of those would
+     eat 176px of a phone's width. At 38px with nothing else nearby to mis-hit,
+     these are still comfortable. */
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
   color: var(--muted);
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
 
-.tab svg {
-  width: 20px;
-  height: 20px;
+.iconbtn:active { background: var(--surface-2); }
+.iconbtn.is-active { color: var(--accent); }
+
+.iconbtn.is-disabled {
+  opacity: 0.3;
+  cursor: default;
+  pointer-events: none;
+}
+
+.iconbtn svg {
+  width: 19px;
+  height: 19px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -360,7 +382,65 @@ input:focus, textarea:focus, select:focus {
   stroke-linejoin: round;
 }
 
-.tab-active { color: var(--accent); }
+/* ---------- finished states ---------- */
+
+/* The agent bar, when a run has ended. Green rather than absent: see chat.html. */
+.agent-bar-done {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 28%, transparent);
+}
+
+.agent-tick { font-weight: 700; }
+
+/* A run that ended without shipping. Neutral, not green: it may have stopped
+   because the work was done, or because the model just stopped talking. */
+.agent-bar-ended { color: var(--muted); }
+
+/* The done tool result, which renders open instead of as a disclosure. Shares the
+   shape of the review card so the two end-of-task cards read as a pair. */
+.shipped-card {
+  border: 1px solid color-mix(in srgb, var(--ok) 32%, var(--border));
+  background: color-mix(in srgb, var(--ok) 5%, var(--bg));
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.shipped-links { margin-top: 10px; }
+.shipped-links .btn { width: auto; }
+
+/* ---------- modal ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, #000 38%, transparent);
+}
+
+.modal[hidden] { display: none; }
+
+/* Stops the page behind the modal scrolling under it. */
+body.modal-open { overflow: hidden; }
+
+.modal-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  width: 100%;
+  max-width: 420px;
+  max-height: 100%;
+  overflow-y: auto;
+  box-shadow: 0 10px 40px color-mix(in srgb, #000 22%, transparent);
+}
+
+.modal-card h2 { margin-bottom: 8px; }
+.modal-card .btn-row { margin-top: 14px; }
 
 /* ---------- login ---------- */
 
@@ -879,10 +959,8 @@ button[data-hold] { touch-action: manipulation; }
 
 /* ---------- desktop ---------- */
 
-/* Not a second design: the same column, allowed to breathe slightly and with the
-   tab bar kept at the bottom where the layout already puts it. */
+/* Not a second design: the same column, allowed to breathe slightly. */
 @media (min-width: 800px) {
   body { font-size: 15.5px; }
   .content { padding: 14px 16px 20px; }
-  .tabbar { grid-template-columns: repeat(3, minmax(0, 160px)); justify-content: center; }
 }

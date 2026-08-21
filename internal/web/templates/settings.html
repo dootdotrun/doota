@@ -13,7 +13,7 @@
 </p>
 {{end}}
 
-<form class="card stack" hx-post="/settings/config" hx-target="#config-status" hx-swap="outerHTML">
+<form class="card stack" hx-post="{{app "/settings/config"}}" hx-target="#config-status" hx-swap="outerHTML">
   <input type="hidden" name="_config_form" value="1">
   {{range .Data.Groups}}
     {{if .Collapsed}}
@@ -53,6 +53,26 @@
             <label for="{{.Key}}">{{.Label}}</label>
             {{if eq .Kind "textarea"}}
               <textarea id="{{.Key}}" name="{{.Key}}" rows="10" spellcheck="false">{{.Value}}</textarea>
+              {{/*
+                Defaults are seeded once and never updated by a later deploy, so a
+                default that shipped broken needs a way back in. type=button keeps
+                this out of the parent form's own submit.
+              */}}
+              <button type="button" class="btn btn-small"
+                      hx-post="{{app "/settings/config/reset"}}"
+                      hx-vals='{"key": "{{.Key}}"}'
+                      hx-target="#config-status" hx-swap="outerHTML"
+                      hx-confirm="Replace this with the built-in default? Unsaved edits on this screen will be lost.">
+                Reset to default
+              </button>
+              {{if eq .Key "sandbox.setup_script"}}
+                <p class="help">
+                  The setup script only runs when a sandbox is created, so resetting
+                  it changes nothing about the sandbox you already have — recreate
+                  the sandbox below, or create the next project, for it to take
+                  effect.
+                </p>
+              {{end}}
             {{else if eq .Kind "int"}}
               <input id="{{.Key}}" name="{{.Key}}" type="number" inputmode="numeric" value="{{.Value}}">
             {{else}}
@@ -70,7 +90,7 @@
   <button type="submit" class="btn btn-primary">Save</button>
 </form>
 
-<form class="card stack" method="post" action="/settings/credentials">
+<form class="card stack" method="post" action="{{app "/settings/credentials"}}">
   <h2>Sign-in</h2>
 
   <div class="field">
@@ -99,9 +119,136 @@
     <span class="pill pill-idle">{{.Data.Provider}}</span>
   </div>
   <p class="muted">Sessions last {{.Data.SessionDays}} days and survive a deploy.</p>
-  <form method="post" action="/logout">
+  <form method="post" action="{{app "/logout"}}">
     <button type="submit" class="btn btn-danger">Sign out</button>
   </form>
 </section>
+
+{{/*
+  The project, last. It used to be its own screen and its own tab, which was a
+  destination for something looked at roughly once per project: the repo it
+  cloned, the port it serves on, and three recovery buttons. Everything here is
+  either read once or pressed when something has already gone wrong, which is
+  what the bottom of Settings is for. The frequent actions from that screen —
+  preview and clear — are in the header now.
+*/}}
+<h1 class="section-head">Project</h1>
+
+{{with .Data.Project}}
+{{if not .Project}}
+
+  <section class="card stack">
+    <h2>Create a project</h2>
+    <p class="muted">
+      A name and a repository URL. That provisions a sandbox, clones the repo, and
+      checks out the <code>doot</code> branch. There is no other setup step.
+    </p>
+
+    <form method="post" action="{{app "/project"}}" class="stack">
+      <div class="field">
+        <label for="name">Name</label>
+        <input id="name" name="name" type="text" required
+               autocapitalize="none" autocorrect="off" spellcheck="false"
+               placeholder="my-side-project">
+      </div>
+
+      <div class="field">
+        <label for="repo_url">Repository URL</label>
+        <input id="repo_url" name="repo_url" type="text" required
+               autocapitalize="none" autocorrect="off" spellcheck="false"
+               placeholder="https://github.com/you/thing.git">
+        <p class="help">
+          Public and private both work. The GitHub token above is installed in the
+          sandbox as a git credential, so clone, fetch, and push all use native git
+          over HTTPS. An SSH-style <code>git@github.com:owner/repo</code> URL is
+          rewritten to HTTPS.
+        </p>
+      </div>
+
+      <button type="submit" class="btn btn-primary">Create project</button>
+    </form>
+    <p class="help">
+      One project at a time, enforced by a unique index in Postgres rather than a
+      check in the UI. To work on something else, delete the current one first.
+    </p>
+  </section>
+
+{{else}}
+
+  <section class="card">
+    <div class="row">
+      <h2>{{.Project.Name}}</h2>
+    </div>
+    <dl class="facts">
+      <dt>Repository</dt><dd class="wrap">{{.Project.RepoURL}}</dd>
+      <dt>Default branch</dt><dd><code>{{.Project.DefaultBranch}}</code></dd>
+      <dt>Working branch</dt><dd><code>{{.WorkBranch}}</code></dd>
+      <dt>Checkout</dt><dd><code>{{.RepoPath}}</code></dd>
+      <dt>Sandbox</dt>
+      <dd>
+        {{if .Project.Sandbox}}<code>{{.Project.Sandbox}}</code>{{else}}—{{end}}
+        <span class="help">via {{.ProviderKind}}</span>
+      </dd>
+    </dl>
+  </section>
+
+  {{template "project_status.html" .}}
+
+  <section class="card stack">
+    <h2>Preview</h2>
+    <p class="muted">
+      Served from the root of this origin and proxied through the sandbox, so it is
+      behind your session — no secret URL and no provider token in the browser. Any
+      port works, and the previewed app's own absolute URLs resolve correctly
+      because it owns the root.
+    </p>
+    {{if .Preview}}
+      <a class="btn btn-primary" href="/" target="_blank" rel="noopener">
+        Open preview (port {{.Project.PreviewPort}})
+      </a>
+    {{else}}
+      <p class="help">Available once the sandbox is ready.</p>
+    {{end}}
+
+    <form method="post" action="{{app "/project/preview-port"}}" class="inline-form">
+      <label for="preview_port">Port</label>
+      <input id="preview_port" name="preview_port" type="number" inputmode="numeric"
+             value="{{.Project.PreviewPort}}" min="1" max="65535">
+      <button type="submit" class="btn">Set</button>
+    </form>
+    <p class="help">
+      Whatever port the dev server listens on. The agent sets this itself once it
+      starts one.
+    </p>
+  </section>
+
+  <section class="card stack danger">
+    <h2>Sandbox recovery</h2>
+    <p class="muted">In increasing order of destructiveness. Try them in that order.</p>
+
+    <form method="post" action="{{app "/project/wake"}}">
+      <button type="submit" class="btn">Wake</button>
+    </form>
+
+    <form method="post" action="{{app "/project/recreate"}}">
+      <button type="submit" class="btn btn-danger"
+              data-hold="1200" data-hold-active="Hold to recreate…">Recreate sandbox</button>
+    </form>
+    <p class="help">
+      Destroys the sandbox and provisions a new one, re-cloning the repo.
+      Uncommitted work is lost.
+    </p>
+
+    <form method="post" action="{{app "/project/delete"}}">
+      <button type="submit" class="btn btn-danger"
+              data-hold="1600" data-hold-active="Hold to delete…">Delete project</button>
+    </form>
+    <p class="help">
+      Destroys the sandbox and clears the project, so a new one can be created.
+    </p>
+  </section>
+
+{{end}}
+{{end}}
 
 {{end}}

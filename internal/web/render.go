@@ -12,12 +12,18 @@ import (
 // page is the data every template receives.
 type page struct {
 	Title  string
-	Active string // which tab is highlighted
-	Status string // status bar text
+	Active string // which header link is highlighted
+	Status string // status chip text
 	User   *store.User
 	Notice string
 	Error  string
 	Data   any
+
+	// State the header's action buttons need. The header is part of the shell, so
+	// whether clearing and previewing are possible has to be known on every screen
+	// rather than only on the one that owns the project.
+	HasProject bool
+	Preview    bool
 }
 
 // htmlEscape escapes text for interpolation into hand-written HTML.

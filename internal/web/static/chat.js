@@ -77,7 +77,11 @@
   var streaming = document.getElementById("streaming");
   var streamingText = document.getElementById("streaming-text");
   var bar = document.getElementById("agent-bar");
+  // The UI is mounted under a prefix; it is published on <body> so this file does
+  // not have to agree with a Go constant by hand.
+  var appPrefix = document.body.getAttribute("data-app-prefix") || "";
   var stateLabel = document.getElementById("agent-state");
+  var spinner = bar ? bar.querySelector(".spinner") : null;
 
   var lastId = parseInt(transcript.dataset.lastMessageId || "0", 10) || 0;
   var fetching = false;
@@ -100,6 +104,25 @@
       return;
     }
     bar.classList.remove("hidden");
+    // "done" is the one terminal state the bar shows rather than hides. Hiding it
+    // is what made a completed task look like a task that never ran.
+    var finished = state === "done";
+    bar.classList.toggle("agent-bar-done", finished && detail === "shipped");
+    bar.classList.toggle("agent-bar-ended", finished && detail !== "shipped");
+    if (spinner) {
+      spinner.hidden = finished;
+    }
+    // The tick is server-rendered, so a live state arriving on the same document
+    // has to take it back down rather than leave it contradicting the label.
+    var tick = bar.querySelector(".agent-tick");
+    if (tick) {
+      tick.hidden = !(finished && detail === "shipped");
+    }
+    if (finished) {
+      // Matches what a reload renders, instead of "done · shipped".
+      stateLabel.textContent = detail === "shipped" ? "shipped" : "stopped";
+      return;
+    }
     // "thinking" is a real state on this model, not a euphemism: it spends most of
     // every call reasoning before it emits a single character, so a UI that only
     // showed streamed text would look stalled for seconds at a time.
@@ -115,7 +138,7 @@
     }
     fetching = true;
 
-    fetch("/chat/tail?after=" + lastId, { credentials: "same-origin" })
+    fetch(appPrefix + "/chat/tail?after=" + lastId, { credentials: "same-origin" })
       .then(function (r) {
         var header = r.headers.get("X-Last-Message-Id");
         if (header) lastId = parseInt(header, 10) || lastId;
@@ -182,7 +205,7 @@
     composer.addEventListener("input", drain);
   }
 
-  var source = new EventSource("/events");
+  var source = new EventSource(appPrefix + "/events");
 
   source.addEventListener("message.delta", function (e) {
     if (!streaming || !streamingText) return;
@@ -211,7 +234,7 @@
     try {
       var payload = JSON.parse(e.data);
       setState(payload.state, payload.detail || "");
-      if (payload.state === "idle" || payload.state === "error") {
+      if (payload.state === "idle" || payload.state === "done" || payload.state === "error") {
         clearStream();
         tail();
       }

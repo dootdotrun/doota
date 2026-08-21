@@ -1,7 +1,6 @@
 package web
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -60,7 +59,7 @@ func (s *Server) loadPlan(r *http.Request, p *store.Project, run *store.Run) *pl
 		}
 	}
 	if pad.BaseCommit != "" {
-		v.DiffURL = "/plan/diff"
+		v.DiffURL = appPrefix + "/plan/diff"
 	}
 	v.CanApprove = run != nil && run.State == store.RunAwaitingHuman &&
 		run.Awaiting() == store.AwaitingPlanApproval && pad.AwaitingApproval()
@@ -142,7 +141,7 @@ func (s *Server) requireProjectForPlan(w http.ResponseWriter, r *http.Request) (
 
 // redirectPlan returns to the Chat screen, which is where the plan is rendered.
 func (s *Server) redirectPlan(w http.ResponseWriter, r *http.Request, notice, errorMessage string) {
-	target := "/"
+	target := appPrefix + "/"
 	if errorMessage != "" {
 		target += "?error=" + urlQueryEscape(errorMessage)
 	} else if notice != "" {
@@ -152,62 +151,3 @@ func (s *Server) redirectPlan(w http.ResponseWriter, r *http.Request, notice, er
 }
 
 func shellQuoteArg(v string) string { return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'" }
-
-type activityData struct {
-	Project    *store.Project
-	Archived   []archiveMessage
-	ToolCalls  []activityToolCall
-	ToolName   string
-	ErrorsOnly bool
-}
-
-type archiveMessage struct {
-	Role, Kind, Content, At string
-}
-
-type activityToolCall struct {
-	Name, Content, At, Duration string
-	IsError                     bool
-}
-
-// archivedLimit bounds the cleared-history list on Activity.
-const archivedLimit = 200
-
-func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
-	projectRow, err := s.store.MostRecentProject(r.Context())
-	if errors.Is(err, store.ErrNotFound) {
-		s.render(w, r, "activity", page{Title: "History", Active: "project", Status: "nothing yet",
-			User: userFrom(r), Data: activityData{}})
-		return
-	}
-	if err != nil {
-		s.log.Error("activity: load project", "error", err)
-		s.render(w, r, "activity", page{Title: "History", Active: "project", Status: "unavailable",
-			User: userFrom(r), Error: "Could not load history.", Data: activityData{}})
-		return
-	}
-	d := activityData{Project: projectRow, ToolName: strings.TrimSpace(r.URL.Query().Get("tool")),
-		ErrorsOnly: r.URL.Query().Get("errors") == "1"}
-	if messages, err := s.store.ArchivedMessages(r.Context(), projectRow.ID, archivedLimit); err == nil {
-		for _, message := range messages {
-			d.Archived = append(d.Archived, archiveMessage{Role: message.Role, Kind: message.MessageKind(),
-				Content: message.Content, At: message.CreatedAt.UTC().Format("2 Jan 15:04")})
-		}
-	} else {
-		s.log.Error("activity: archived messages", "error", err)
-	}
-	if calls, err := s.store.ProjectToolCalls(r.Context(), projectRow.ID, d.ToolName, d.ErrorsOnly, 100); err == nil {
-		for _, call := range calls {
-			d.ToolCalls = append(d.ToolCalls, activityToolCall{Name: call.ToolName, Content: call.Content(),
-				IsError: call.IsError, At: call.CreatedAt.UTC().Format("2 Jan 15:04"),
-				Duration: call.Duration().Round(time.Millisecond).String()})
-		}
-	} else {
-		s.log.Error("activity: tool calls", "error", err)
-	}
-	status := "history"
-	if projectRow.DeletedAt.Valid {
-		status = "archived project"
-	}
-	s.render(w, r, "activity", page{Title: "History", Active: "project", Status: status, User: userFrom(r), Data: d})
-}

@@ -17,7 +17,8 @@ import (
 //
 // A goal produces hundreds of tool calls, and a phone rendering all of them is slow
 // for no benefit — the interesting end of a conversation is the recent end. Older
-// turns stay in Postgres and become browsable on Activity in Phase 8.
+// turns stay in Postgres and are still in the model's context; they are just not
+// painted.
 const transcriptLimit = 300
 
 // messageView is one rendered turn.
@@ -39,8 +40,16 @@ type messageView struct {
 	Tool    string
 	Diff    *diffView
 	Review  *reviewView
+	Ship    *shipView
 	Summary string
 	IsError bool
+}
+
+// shipView is the payoff of a finished task: what to look at now.
+type shipView struct {
+	Summary    string
+	PreviewURL string
+	PRURL      string
 }
 
 type reviewView struct {
@@ -68,10 +77,18 @@ type chatData struct {
 	LastMessageID  int64
 	Run            *store.Run
 	AwaitingDetail string
-	AwaitingError  string
-	Ready          bool
-	Blocked        string
-	Model          string
+
+	// LastRun is the most recent run, set only when nothing is active, so the
+	// screen can show that the previous task finished.
+	//
+	// Deliberately a second field rather than reusing Run: CanSend keys off Run
+	// being nil, so parking a finished run there would disable the composer for
+	// good the moment a task completed.
+	LastRun       *store.Run
+	AwaitingError string
+	Ready         bool
+	Blocked       string
+	Model         string
 
 	// Plan is the task board, rendered on this screen rather than its own.
 	//
@@ -91,7 +108,7 @@ type chatData struct {
 // Written per status rather than interpolated, because the interpolated version
 // produced "The sandbox is error." — and the four cases do not want the same
 // sentence anyway: two of them are fixed by waiting and two need a button on the
-// Project screen.
+// Settings screen.
 func sandboxBlockedMessage(status string) string {
 	switch status {
 	case store.SandboxProvisioning:
@@ -99,9 +116,9 @@ func sandboxBlockedMessage(status string) string {
 	case store.SandboxSleeping:
 		return "The sandbox is asleep. Anything I run will wake it, which takes a moment."
 	case store.SandboxError:
-		return "The sandbox failed to set up. Check the setup log on the Project screen, then recreate it."
+		return "The sandbox failed to set up. Check the setup log in Settings, then recreate it there."
 	case store.SandboxMissing:
-		return "The sandbox no longer exists. Recreate it on the Project screen."
+		return "The sandbox no longer exists. Recreate it in Settings."
 	default:
 		return "The sandbox is not ready. I can talk, but tools that touch it will fail."
 	}
@@ -124,7 +141,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	p, err := s.projects.Active(r.Context())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		d.Blocked = "There is no project yet. Create one on the Project screen and I can start working in it."
+		d.Blocked = "There is no project yet. Create one in Settings and I can start working in it."
 	case err != nil:
 		s.log.Error("chat: load project", "error", err)
 		d.Blocked = "Could not load the project."
@@ -148,6 +165,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if !errors.Is(runErr, store.ErrNotFound) {
 			s.log.Error("chat: load run", "error", runErr)
+		} else if last, lastErr := s.store.LatestRun(r.Context(), p.ID); lastErr == nil {
+			d.LastRun = last
+		} else if !errors.Is(lastErr, store.ErrNotFound) {
+			s.log.Error("chat: load last run", "error", lastErr)
 		}
 		if !p.IsReady() {
 			d.Blocked = sandboxBlockedMessage(p.SandboxStatus)
@@ -166,21 +187,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// "idle" is reserved for a project that has genuinely not done anything. A run
+	// that ended says so, because the two used to be the same word.
 	status := "idle"
-	if d.Busy() {
+	switch {
+	case d.Busy():
 		status = "working"
-	} else if d.Run != nil {
+	case d.Run != nil:
 		status = d.Run.State
+	case d.LastRun != nil && d.LastRun.State == store.RunDone:
+		status = "shipped"
+	case d.LastRun != nil:
+		status = "finished"
 	}
 
 	s.render(w, r, "chat", page{
-		Title:  "Chat",
-		Active: "chat",
-		Status: status,
-		User:   userFrom(r),
-		Notice: r.URL.Query().Get("notice"),
-		Error:  r.URL.Query().Get("error"),
-		Data:   d,
+		Title:      "Chat",
+		Active:     "chat",
+		Status:     status,
+		User:       userFrom(r),
+		Notice:     r.URL.Query().Get("notice"),
+		Error:      r.URL.Query().Get("error"),
+		Data:       d,
+		HasProject: d.Project != nil,
+		Preview:    previewAvailable(d.Project),
 	})
 }
 
@@ -308,7 +338,7 @@ func (s *Server) requireProjectForChat(w http.ResponseWriter, r *http.Request) (
 }
 
 func (s *Server) redirectChat(w http.ResponseWriter, r *http.Request, notice, errMsg string) {
-	target := "/"
+	target := appPrefix + "/"
 	switch {
 	case errMsg != "":
 		target += "?error=" + urlQueryEscape(errMsg)
@@ -332,10 +362,14 @@ func renderMessages(msgs []*store.Message) []messageView {
 			Tool:        m.Tool(),
 		}
 
-		// An assistant turn whose only purpose was requesting tools has no text.
-		// Rendering an empty bubble for it would be noise; the tool rows that follow
-		// say everything it would have said.
-		if m.Role == store.RoleAssistant && strings.TrimSpace(m.Content) == "" && m.HasToolCalls() {
+		// An assistant turn whose only purpose was requesting tools has no text, and
+		// the tool rows that follow say everything it would have said.
+		//
+		// The tool-call condition this used to carry is gone: a turn with no text and
+		// no tools is a model that stopped without saying anything, and an empty
+		// bubble is a worse report of that than no bubble at all. The agent bar now
+		// says the run finished, which is the signal that was actually missing.
+		if m.Role == store.RoleAssistant && strings.TrimSpace(m.Content) == "" {
 			continue
 		}
 
@@ -343,6 +377,16 @@ func renderMessages(msgs []*store.Message) []messageView {
 			v.Summary, v.IsError = summariseToolResult(m)
 			v.Diff = extractDiff(m)
 			v.Review = extractReview(m)
+			// Only a done result that actually shipped is treated as prose rather
+			// than as command output. It is the end of the task, and the markdown
+			// renderer has Linkify enabled, which makes the pull request URL
+			// tappable. A done call that was refused stays a plain tool result.
+			if m.Tool() == "done" {
+				if ship := extractShip(m); ship != nil {
+					v.Ship = ship
+					v.HTML = renderMarkdown(m.Content)
+				}
+			}
 		} else if m.Role != store.RoleUser {
 			// Everything the model wrote — assistant prose, a question from ask_human,
 			// a notice the loop emitted — is markdown. A tool result is not: it is
@@ -384,6 +428,8 @@ func summariseToolResult(m *store.Message) (summary string, isError bool) {
 			Command string `json:"command"`
 			Exit    *int   `json:"exit_code"`
 			Matches *int   `json:"matches"`
+			Summary string `json:"summary"`
+			Shipped bool   `json:"shipped"`
 		}
 		if json.Unmarshal(m.ToolDisplay, &d) == nil {
 			switch {
@@ -405,6 +451,13 @@ func summariseToolResult(m *store.Message) (summary string, isError bool) {
 				return d.Name, false
 			case d.Scope != "":
 				return d.Scope, false
+			case d.Shipped:
+				return clip(d.Summary, 90), false
+			case d.Summary != "":
+				// done was called and refused: a dirty worktree, an unreviewed diff,
+				// or a failed push. The first line says which. Not a success, so it
+				// does not get to look like one.
+				return first, true
 			}
 		}
 	}
@@ -440,6 +493,32 @@ func extractDiff(m *store.Message) *diffView {
 		view.Lines = append(view.Lines, diffLine{Kind: kind, Text: line})
 	}
 	return view
+}
+
+// extractShip pulls the links out of the done tool's display payload.
+func extractShip(m *store.Message) *shipView {
+	if !m.Display() {
+		return nil
+	}
+	var d struct {
+		Summary     string `json:"summary"`
+		Shipped     bool   `json:"shipped"`
+		PreviewURL  string `json:"preview_url"`
+		PullRequest struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	}
+	if json.Unmarshal(m.ToolDisplay, &d) != nil {
+		return nil
+	}
+	// Nil for the three done results that did not ship, which is what stops the
+	// template heading them "Task shipped".
+	if !d.Shipped {
+		return nil
+	}
+	// A push that opened no pull request still ships, so an absent URL is normal
+	// rather than a reason to drop the card.
+	return &shipView{Summary: d.Summary, PreviewURL: d.PreviewURL, PRURL: d.PullRequest.URL}
 }
 
 func extractReview(m *store.Message) *reviewView {

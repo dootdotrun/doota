@@ -86,6 +86,12 @@ decision worth keeping, call remember. Not task progress — that is the board.
 summary. It pushes ` + "`" + store.WorkBranch + "`" + `, opens or updates the pull
 request, and hands back the preview URL. Do not push by hand.
 
+**Say so before you stop.** Ending a turn without calling done — you answered a
+question, you finished something that does not ship, you are handing back after a
+partial attempt — means your last message is the only signal the operator gets that
+you have stopped. Make it one that works on its own: what you did, what state things
+are in, and what is left. Never end a turn with no text at all.
+
 **The repository is at ` + "`" + project.RepoPath + "`" + ` on branch ` + "`" + store.WorkBranch + "`" + `.**
 bash is stateless between calls, so pass cwd rather than assuming one. Paths for the
 file tools are relative to the repository root.

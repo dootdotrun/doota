@@ -13,9 +13,6 @@ import (
 	"github.com/dootdotrun/doot-ai/internal/store"
 )
 
-// previewPrefix is where the sandbox's dev server is mounted.
-const previewPrefix = "/preview"
-
 // handlePreview reverse-proxies to a dev server running inside the sandbox.
 //
 // Traffic goes phone -> this app -> a TCP tunnel into the sandbox -> the dev
@@ -26,9 +23,24 @@ const previewPrefix = "/preview"
 //     leak and no provider token in the browser.
 //   - Any port works. The Sprite's own public URL only routes to 8080; dialling
 //     the port directly makes that irrelevant for the human preview path.
+//
+// This is mounted at the root and passes the path through untouched. It used to
+// live under /preview and strip that prefix, which meant the previewed app's own
+// root-absolute URLs — assets, fetch calls, history pushes, Path=/ cookies —
+// resolved to doot instead of to the previewed app. See appPrefix.
 func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	p, err := s.projects.Active(r.Context())
 	if err != nil {
+		// The origin root is the bare domain, the old bookmark, and the start_url of
+		// any home-screen app installed before the move. Answering a 502 there when
+		// there is simply no project yet makes a fresh deployment look broken, so a
+		// navigation goes to the UI instead. Sub-resource requests still get the
+		// error page, because redirecting a stylesheet to an HTML document is worse
+		// than failing it.
+		if isNavigation(r) {
+			http.Redirect(w, r, appPrefix+"/", http.StatusSeeOther)
+			return
+		}
 		s.previewError(w, r, "No project", "Create a project before opening a preview.")
 		return
 	}
@@ -53,11 +65,12 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			// Strip the mount prefix so the app sees the paths it expects.
-			pr.Out.URL.Path = strings.TrimPrefix(pr.In.URL.Path, previewPrefix)
-			if pr.Out.URL.Path == "" {
-				pr.Out.URL.Path = "/"
-			}
+			// The path is passed through exactly as it arrived. SetURL would
+			// otherwise join it onto the target's path, and RawPath is carried over
+			// with it so a percent-encoded segment is not silently re-encoded from
+			// its decoded form.
+			pr.Out.URL.Path = pr.In.URL.Path
+			pr.Out.URL.RawPath = pr.In.URL.RawPath
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
 		},
@@ -79,7 +92,7 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 			s.log.Warn("preview proxy", "error", err, "port", port, "path", r.URL.Path)
 			s.previewError(w, r, "Nothing listening",
 				fmt.Sprintf("Could not reach a server on port %d inside the sandbox. "+
-					"Start a dev server there, or change the preview port on the Project screen.", port))
+					"Start a dev server there, or change the preview port in Settings.", port))
 		},
 	}
 
@@ -102,19 +115,26 @@ func (s *Server) previewError(w http.ResponseWriter, r *http.Request, title, det
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>%s</title>
-<link rel="stylesheet" href="/static/app.css"></head>
+<link rel="stylesheet" href="%s/static/app.css"></head>
 <body class="centered"><main class="gate">
 <h1 class="gate-mark">%s</h1>
 <p class="muted">%s</p>
-<p><a href="/project">Back to Project</a></p>
+<p><a href="%s/">Back to doot</a></p>
 </main></body></html>`,
-		htmlEscape(title), htmlEscape(title), htmlEscape(detail))
+		htmlEscape(title), appPrefix, htmlEscape(title), htmlEscape(detail), appPrefix)
 }
 
-// handlePreviewRedirect sends a bare /preview to /preview/ so relative asset
-// paths in the previewed app resolve correctly.
-func (s *Server) handlePreviewRedirect(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, previewPrefix+"/", http.StatusMovedPermanently)
+// isNavigation reports whether the browser is loading a document rather than a
+// sub-resource.
+//
+// Sec-Fetch-Mode is the reliable signal and is sent by every current browser; the
+// Accept sniff is the fallback for anything that omits it.
+func isNavigation(r *http.Request) bool {
+	if mode := r.Header.Get("Sec-Fetch-Mode"); mode != "" {
+		return mode == "navigate"
+	}
+	return r.Method == http.MethodGet &&
+		strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 // previewAvailable reports whether a preview link is worth showing.

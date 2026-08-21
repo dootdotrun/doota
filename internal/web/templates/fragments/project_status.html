@@ -1,11 +1,11 @@
 {{/*
-  Status card for the Project screen.
+  Status card for the Project section of Settings.
 
   The polling attributes are present only while provisioning, so when setup
   finishes the swapped-in fragment has no trigger and polling stops by itself.
 */}}
 <section id="project-status" class="card"
-  {{if .Provisioning}}hx-get="/project/status" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+  {{if .Provisioning}}hx-get="{{app "/project/status"}}" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
 
   <div class="row">
     <h2>Sandbox</h2>

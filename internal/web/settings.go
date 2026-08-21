@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -58,39 +59,63 @@ type settingsData struct {
 	SessionDays            int
 	Missing                []string
 	Provider               string
+
+	// Project is the section at the bottom of the screen, which used to be a tab
+	// of its own. Always populated — with a zero value carrying only the provider
+	// name when there is no project, so the template can render the create form.
+	Project projectData
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	user := userFrom(r)
 
+	// Read first, so the header's action icons and the Project section below agree
+	// with each other even if the config read fails.
+	pv, projectErr := s.projectView(r)
+	switch {
+	case errors.Is(projectErr, store.ErrNotFound):
+		pv = projectData{ProviderKind: s.projects.ProviderKind()}
+	case projectErr != nil:
+		s.log.Error("settings: load project", "error", projectErr)
+		pv = projectData{ProviderKind: s.projects.ProviderKind()}
+	}
+
+	p := page{
+		Title:      "Settings",
+		Active:     "settings",
+		Status:     pv.StatusLabel,
+		User:       user,
+		Notice:     r.URL.Query().Get("notice"),
+		Error:      r.URL.Query().Get("error"),
+		HasProject: pv.Project != nil,
+		Preview:    pv.Preview,
+	}
+
+	// Data must be a settingsData on every path, including the failure below: the
+	// template dereferences it on its first line, so a nil Data would turn "could
+	// not load configuration" into a bare 500.
+	d := settingsData{
+		Username: user.Username,
+		Provider: s.projects.ProviderKind(),
+		Project:  pv,
+	}
+
 	cfg, err := s.store.LoadConfig(r.Context())
 	if err != nil {
 		s.log.Error("load config", "error", err)
-		// Data must be a settingsData even here: the template dereferences it on
-		// its first line, so rendering with a nil Data would turn "could not load
-		// configuration" into a bare 500.
-		s.render(w, r, "settings", page{
-			Title: "Settings", Active: "settings", User: user,
-			Error: "Could not load configuration.",
-			Data:  settingsData{Username: user.Username},
-		})
+		p.Error = "Could not load configuration."
+		p.Data = d
+		s.render(w, r, "settings", p)
 		return
 	}
 
-	s.render(w, r, "settings", page{
-		Title:  "Settings",
-		Active: "settings",
-		User:   user,
-		Notice: r.URL.Query().Get("notice"),
-		Data: settingsData{
-			Groups:                 buildGroups(cfg),
-			Username:               user.Username,
-			PasswordChangeRequired: user.PasswordChangeRequired,
-			SessionDays:            int(s.sess.TTL().Hours() / 24),
-			Missing:                cfg.MissingCredentials(),
-			Provider:               s.projects.ProviderKind(),
-		},
-	})
+	d.Groups = buildGroups(cfg)
+	d.PasswordChangeRequired = user.PasswordChangeRequired
+	d.SessionDays = int(s.sess.TTL().Hours() / 24)
+	d.Missing = cfg.MissingCredentials()
+	p.Data = d
+
+	s.render(w, r, "settings", p)
 }
 
 func buildGroups(cfg store.AppConfig) []settingsGroup {
@@ -184,6 +209,49 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	s.settingsStatus(w, true, "Saved.")
 }
 
+// handleResetConfigField restores one setting to its compiled-in default.
+//
+// This exists because EnsureConfigDefaults seeds rows with ON CONFLICT DO NOTHING,
+// so a key written once is never updated by a later deploy. That is the right rule
+// — it stops a redeploy reverting an edit — but it means a default that shipped
+// broken stays broken forever. The setup script shipped with bash arrays that dash
+// could not parse, and without this the only remedy was retyping sixty lines of
+// shell into a phone.
+//
+// Deliberately not a "reset everything" button: one field at a time, named, and
+// confirmed in the template.
+func (s *Server) handleResetConfigField(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		s.resetStatus(w, "Malformed form submission.")
+		return
+	}
+
+	key := r.PostFormValue("key")
+	field, ok := store.FieldByKey(key)
+	if !ok {
+		s.resetStatus(w, "No such setting.")
+		return
+	}
+	// Every credential's default is the empty string, so "reset" would read as an
+	// accidental wipe. Clearing one is already an explicit checkbox on the form.
+	if field.Secret() {
+		s.resetStatus(w, "Credentials have no default to reset to.")
+		return
+	}
+
+	if err := s.store.SetConfigValues(r.Context(), map[string]any{key: field.Default}); err != nil {
+		s.log.Error("reset config field", "error", err, "key", key)
+		s.resetStatus(w, "Could not reset "+field.Label+".")
+		return
+	}
+
+	s.log.Info("configuration reset to default", "key", key)
+	// A full reload rather than a status line: the whole point is the restored
+	// contents of the textarea, which cannot be swapped in from here.
+	w.Header().Set("HX-Refresh", "true")
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
 	user := userFrom(r)
 
@@ -245,7 +313,7 @@ func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) redirectSettings(w http.ResponseWriter, r *http.Request, notice string) {
-	http.Redirect(w, r, "/settings?notice="+template.URLQueryEscaper(notice), http.StatusSeeOther)
+	http.Redirect(w, r, appPrefix+"/settings?notice="+template.URLQueryEscaper(notice), http.StatusSeeOther)
 }
 
 // settingsStatus returns the htmx fragment that replaces the save status line.
@@ -259,4 +327,14 @@ func (s *Server) settingsStatus(w http.ResponseWriter, ok bool, msg string) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 	}
 	fmt.Fprintf(w, `<p id="config-status" class="%s">%s</p>`, class, template.HTMLEscapeString(msg))
+}
+
+// resetStatus reports a failed reset.
+//
+// Separate from settingsStatus because it answers 200. htmx does not swap a 4xx
+// response by default, so the 422 that settingsStatus returns would leave the
+// reset button silently doing nothing at all.
+func (s *Server) resetStatus(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<p id="config-status" class="status-err">%s</p>`, template.HTMLEscapeString(msg))
 }

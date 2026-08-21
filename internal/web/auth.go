@@ -98,11 +98,11 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	// htmx swallows a 302 into the fragment; this header makes it navigate.
 	if r.Header.Get("HX-Request") == "true" {
-		w.Header().Set("HX-Redirect", "/login")
+		w.Header().Set("HX-Redirect", appPrefix+"/login")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	http.Redirect(w, r, appPrefix+"/login", http.StatusSeeOther)
 }
 
 // userFrom returns the authenticated user. Only valid behind requireAuth.
@@ -113,7 +113,7 @@ func userFrom(r *http.Request) *store.User {
 
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.sess.UserID(r); ok {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, appPrefix+"/", http.StatusSeeOther)
 		return
 	}
 	s.render(w, r, "login", page{Title: "Sign in"})
@@ -158,12 +158,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.limiter.reset(key)
 	s.sess.Issue(w, r, user.ID)
 	s.log.Info("login", "username", user.Username)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, appPrefix+"/", http.StatusSeeOther)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.sess.Clear(w, r)
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	http.Redirect(w, r, appPrefix+"/login", http.StatusSeeOther)
 }
 
 func clientKey(r *http.Request) string {
