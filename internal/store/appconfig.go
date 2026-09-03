@@ -110,22 +110,22 @@ var ConfigFields = []Field{
 	{
 		Key: KeyModelAPIKey, Group: "Credentials", Label: "Model API key", Kind: KindSecret,
 		Default: "",
-		Help:    "Sent as the bearer token to the endpoint below.",
+		Help:    "Bearer token for the endpoint below.",
 	},
 	{
 		Key: KeySpriteToken, Group: "Credentials", Label: "Fly Sprites token", Kind: KindSecret,
 		Default: "",
-		Help:    "Creates and runs the sandbox each project is built in.",
+		Help:    "Runs the sandbox.",
 	},
 	{
 		Key: KeyGitHubToken, Group: "Credentials", Label: "GitHub token", Kind: KindSecret,
 		Default: "",
-		Help:    "Classic or fine-grained PAT with repo scope. Used for clone, push, and pull requests.",
+		Help:    "PAT with repo scope.",
 	},
 	{
 		Key: KeyModelName, Group: "Model", Label: "Model", Kind: KindText,
 		Default: "muse-spark-1.3-contributor",
-		Help:    "Model id sent to the API.",
+		Help:    "",
 	},
 	{
 		Key: KeyReasoningEffort, Group: "Model", Label: "Reasoning effort", Kind: KindChoice,
@@ -137,7 +137,7 @@ var ConfigFields = []Field{
 		// a reasonable one. It is exposed because this is the most direct lever on how
 		// carefully the agent works, and it was previously not sent at all.
 		Default: "",
-		Help:    "Blank lets the model choose. Higher costs more tokens and thinks longer.",
+		Help:    "Blank lets the model choose.",
 	},
 	{
 		Key: KeyModelBaseURL, Group: "Model", Label: "Base URL", Kind: KindText,
@@ -154,19 +154,18 @@ var ConfigFields = []Field{
 		// Mirrors model.MaxOutputTokens. Duplicated rather than imported, for the same
 		// reason the role constants are: this layer describes a stored setting and
 		// that one describes a wire format.
-		Max: 131072,
-		Help: "Covers reasoning as well as visible output, and reasoning comes first. " +
-			"Maximum 131072.",
+		Max:  131072,
+		Help: "Includes reasoning. Max 131072.",
 	},
 	{
 		Key: "agent.system_prompt", Group: "Agent", Label: "System prompt", Kind: KindTextarea,
 		Default: DefaultSystemPrompt,
-		Help:    "The highest-leverage setting here. Editable without a redeploy.",
+		Help:    "",
 	},
 	{
 		Key: "sandbox.setup_script", Group: "Sandbox", Label: "Setup script", Kind: KindTextarea,
 		Default: DefaultSetupScript,
-		Help:    "Runs once when a project is created. The filesystem persists, so this is not re-run on wake.",
+		Help:    "Runs once at project creation.",
 	},
 	{
 		Key: "git.author_name", Group: "Git", Label: "Commit author name", Kind: KindText,
@@ -190,6 +189,20 @@ var requiredCredentials = []struct {
 	{KeyModelAPIKey, "Model API key"},
 	{KeySpriteToken, "Fly Sprites token"},
 	{KeyGitHubToken, "GitHub token"},
+}
+
+// RequiredCredential reports whether this key is one the setup banner complains
+// about when it is unset.
+//
+// Exported so the Settings screen can open exactly the group the banner is pointing
+// at, rather than keeping a second list of which credentials matter.
+func RequiredCredential(key string) bool {
+	for _, r := range requiredCredentials {
+		if r.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // FieldByKey returns the field definition for a key.

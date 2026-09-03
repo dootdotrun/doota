@@ -321,6 +321,7 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		if strings.TrimSpace(resp.Content) != "" {
 			msg, appendErr := s.store.AppendMessage(ctx, store.NewMessage{ProjectID: r.ProjectID, RunID: r.ID,
 				Role: model.RoleAssistant, Content: resp.Content, TokenCount: resp.Usage.CompletionTokens,
+				PromptTokens: resp.Usage.PromptTokens, ReasoningTokens: resp.Usage.ReasoningTokens,
 				ReasoningItems: encodeReasoning(resp.Reasoning), Interrupted: true})
 			if appendErr != nil {
 				return false, appendErr
@@ -344,7 +345,8 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 	}
 	assistant, err = s.store.AppendMessage(ctx, store.NewMessage{ProjectID: r.ProjectID, RunID: r.ID,
 		Role: model.RoleAssistant, Content: resp.Content, ToolCalls: encoded,
-		TokenCount: resp.Usage.CompletionTokens, ReasoningItems: encodeReasoning(resp.Reasoning)})
+		TokenCount: resp.Usage.CompletionTokens, PromptTokens: resp.Usage.PromptTokens,
+		ReasoningTokens: resp.Usage.ReasoningTokens, ReasoningItems: encodeReasoning(resp.Reasoning)})
 	if err != nil {
 		return false, err
 	}

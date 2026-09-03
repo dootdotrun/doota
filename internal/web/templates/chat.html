@@ -37,10 +37,12 @@
   {{/* The hint is a tooltip rather than visible text: it only matters on a
        desktop keyboard, and this screen is not the place for a shortcut legend. */}}
   <button type="submit" class="send" aria-label="Send" title="Send (Ctrl+Enter). Enter adds a new line."
-          {{if not .Data.CanSend}}disabled{{end}}>
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4M5 11l7-7 7 7"/></svg>
-  </button>
+          {{if not .Data.CanSend}}disabled{{end}}>{{template "icon-send"}}</button>
 </form>
 
-{{if .Data.Model}}<p class="chat-foot">{{.Data.Model}}</p>{{end}}
+{{/* Model and how full the context is. The second half is why a 1M-token window
+     that feels exhausted can be checked rather than guessed at. */}}
+{{if .Data.Model}}
+<p class="chat-foot">{{.Data.Model}}{{with .Data.Context}} · {{.}}{{end}}</p>
+{{end}}
 {{end}}

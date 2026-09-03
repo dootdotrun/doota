@@ -57,11 +57,13 @@ type settingsGroup struct {
 	Name   string
 	Fields []settingsField
 
-	// Collapsed starts the group closed. The system prompt and the setup script
-	// are each a screen tall and are edited once in a blue moon, so leaving them
-	// open buries the four fields anyone actually comes here for. Fields inside a
-	// closed <details> still submit with the form.
+	// Collapsed starts the group closed, which is the default for every group.
+	// Fields inside a closed <details> still submit with the form.
 	Collapsed bool
+
+	// NeedsAttention marks a group containing a required credential that is not set.
+	// It is the only thing that opens a group on arrival.
+	NeedsAttention bool
 }
 
 type settingsData struct {
@@ -179,7 +181,7 @@ func buildGroups(cfg store.AppConfig) []settingsGroup {
 				options = append(options, settingsOption{Value: c, Label: label, Selected: c == current})
 			}
 
-			g.Fields = append(g.Fields, settingsField{
+			field := settingsField{
 				Key:     f.Key,
 				Label:   f.Label,
 				Help:    f.Help,
@@ -189,18 +191,26 @@ func buildGroups(cfg store.AppConfig) []settingsGroup {
 				Options: options,
 				Secret:  f.Secret(),
 				IsSet:   cfg.IsSet(f.Key),
-			})
+			}
+			if !field.IsSet && store.RequiredCredential(f.Key) {
+				g.NeedsAttention = true
+			}
+			g.Fields = append(g.Fields, field)
 		}
 		if len(g.Fields) > 0 {
-			// A group is collapsed when everything in it is a full-height textarea,
-			// which is the same thing as "this is the long, rarely-touched stuff".
-			g.Collapsed = true
-			for _, f := range g.Fields {
-				if f.Kind != string(store.KindTextarea) {
-					g.Collapsed = false
-					break
-				}
-			}
+			// Everything starts closed, so opening a group is something the operator
+			// chose to do.
+			//
+			// The rule used to be "collapsed when every field is a textarea", which
+			// meant Credentials, Model and Git could never collapse — three of the five
+			// groups, plus four more sections below them, all open at once. Arriving at
+			// Settings to change one value meant reading the entire configuration
+			// surface of the application.
+			//
+			// The single exception is a group holding a credential that is missing,
+			// because the banner at the top of the screen sends the operator here to
+			// fill it in and hiding it behind a click would be a dead end.
+			g.Collapsed = !g.NeedsAttention
 			groups = append(groups, g)
 		}
 	}

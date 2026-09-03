@@ -1,14 +1,14 @@
 {
-  "id": "/",
+  "id": "/app/",
   "name": "doot",
   "short_name": "doot",
-  "description": "Autonomous coding agent for one project.",
+  "description": "Coding agent for one project.",
   "start_url": "/app/",
   "scope": "/app/",
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
-  "background_color": "#ffffff",
+  "background_color": "#1d4ed8",
   "theme_color": "#ffffff",
   "icons": [
     {

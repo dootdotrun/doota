@@ -92,6 +92,15 @@ import (
 // value that predates the bound from bricking every request.
 const MaxOutputTokens = 131072
 
+// ContextWindow is how much the model can hold in one request.
+//
+// Used only to render "how full is the context" as a fraction, which is worth having
+// because a window this large feeling exhausted is indistinguishable from one that is
+// without a number on screen. It is a display constant, not a limit this code
+// enforces — the API enforces its own — so a model with a different window makes the
+// denominator wrong and nothing else.
+const ContextWindow = 1048576
+
 // Roles, mirroring the message table's check constraint.
 const (
 	RoleSystem    = "system"

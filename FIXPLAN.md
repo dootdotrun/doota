@@ -184,15 +184,52 @@ work).
       cannot repair from this UI should not be able to hold work hostage — but it
       should not be able to launder it either.
 
-## Turn 3 — the UI you want to look at.
+## Turn 3 — the UI you want to look at. ✅ DONE
 
-- [ ] **T3.1 — Settings** (F16) — every group collapsed by default; wrap the four
-      trailing sections
-- [ ] **T3.2 — Strip teaching copy** (F17) — one-line delete confirm; help text
-      behind a disclosure or gone
-- [ ] **T3.3 — Real icon set** (F18) — inline SVG, no dependency
-- [ ] **T3.4 — PWA identity** (F19) — `id`/scope, splash, icon consistency
-- [ ] **T3.5 — Token usage readout** (F26) — stop guessing about the window
+- [x] **T3.1 — Settings** (F16) — everything closed on arrival. The old rule
+      ("collapsed only if every field is a textarea") could never close Credentials,
+      Model or Git; the four trailing sections — Sign-in, Session, and the whole
+      Project block — were not in the group loop at all and were always open. All of
+      it is `<details>` now, all closed.
+
+      One conditional exception, because a rule with no exception here would be
+      worse: a group holding an **unset required credential** opens, since the banner
+      at the top sends you there to fill it in. Same for the create-project form when
+      there is no project, and Sign-in while still on the default password. Nothing
+      else opens itself.
+- [x] **T3.2 — Teaching copy cut** (F17)
+  - Delete confirmation: two paragraphs → "Clear this conversation?" + two buttons
+  - Field help trimmed at the source, in `ConfigFields`, not hidden in the template
+    — "Covers reasoning as well as visible output, and reasoning comes first.
+    Maximum 131072." became "Includes reasoning. Max 131072." Two fields lost their
+    help entirely because the label already said it
+  - The repo-URL, preview, setup-script and sandbox-recovery paragraphs are one
+    short line each. `sandboxBlockedMessage` went from a sentence-and-a-clause per
+    status to a fragment
+- [x] **T3.3 — Real icon set** (F18) — new `fragments/icons.html`, defined once and
+      shared, so the enabled and disabled variants of each header button stop
+      carrying duplicate path data.
+
+      The settings glyph is now **sliders, not a gear**: a gear needs eight teeth to
+      read as a gear and eight teeth at 19px is mud. The old one was a circle with
+      six disconnected tick marks around it. Reload, clear and preview are redrawn
+      with geometry that survives 19px; send is unchanged in meaning.
+- [x] **T3.4 — PWA identity** (F19)
+  - `id` was `/` while `scope` and `start_url` were `/app/`. Now all `/app/`
+  - `background_color` was `#ffffff` on a white `theme_color`, so both platforms
+    generated a blank white splash. Background is now the accent blue
+  - **Icons regenerated** to match the app: accent blue, two white dots for the
+    "oo" in doot, antialiased by 4x supersampling in a throwaway Go generator (no
+    image library needed). Maskable variant is full-bleed with the mark inside the
+    safe zone
+  - *Correction to F19:* the maskable icon being RGB rather than RGBA is **not** a
+    defect. A maskable icon must be fully opaque, so PNG drops the alpha channel
+    correctly. The original finding overstated that one
+- [x] **T3.5 — Context readout** (F26) — migration 004 adds `prompt_tokens` and
+      `reasoning_tokens` to `message`; `token_count` only ever held completion
+      tokens, which answers what a reply cost and not how full the conversation is.
+      The footer now reads e.g. `muse-spark-1.3-contributor · 250k / 1048k · 23%`,
+      taken from the API's own accounting on the last call rather than estimated.
 
 ## Turn 4 — the UI/UX subagent.
 
