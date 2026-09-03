@@ -26,6 +26,7 @@ type settingsField struct {
 	Kind    string
 	Value   string
 	Checked bool
+	Options []settingsOption
 
 	// Secret fields render an empty input whatever is stored. IsSet is the only
 	// thing said about the stored value, and Placeholder says what submitting
@@ -44,6 +45,13 @@ func (f settingsField) Placeholder() string {
 
 // ClearKey names the checkbox that removes a stored secret.
 func (f settingsField) ClearKey() string { return f.Key + clearSuffix }
+
+// settingsOption is one entry of a KindChoice select.
+type settingsOption struct {
+	Value    string
+	Label    string
+	Selected bool
+}
 
 type settingsGroup struct {
 	Name   string
@@ -149,13 +157,26 @@ func buildGroups(cfg store.AppConfig) []settingsGroup {
 			if f.Group != name {
 				continue
 			}
+			current := cfg.Display(f)
+			var options []settingsOption
+			for _, c := range f.Choices {
+				label := c
+				if c == "" {
+					// The blank option needs a name, or it renders as an empty row that
+					// looks like a rendering bug rather than a deliberate default.
+					label = "let the model decide"
+				}
+				options = append(options, settingsOption{Value: c, Label: label, Selected: c == current})
+			}
+
 			g.Fields = append(g.Fields, settingsField{
 				Key:     f.Key,
 				Label:   f.Label,
 				Help:    f.Help,
 				Kind:    string(f.Kind),
-				Value:   cfg.Display(f),
+				Value:   current,
 				Checked: f.Kind == store.KindBool && cfg.Bool(f.Key),
+				Options: options,
 				Secret:  f.Secret(),
 				IsSet:   cfg.IsSet(f.Key),
 			})

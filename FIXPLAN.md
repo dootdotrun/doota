@@ -46,15 +46,24 @@ Severity: **S1** breaks the tool · **S2** degrades it badly · **S3** friction/
 
 ## Open decisions
 
-Blocking Turn 2 and Turn 4. Nothing in Turn 1 or 3 waits on these.
+- **D1 — Reasoning continuity scope (F7). ✅ DECIDED: full Responses API
+  migration.** No half-measure on the Chat Completions path.
 
-- **D1 — Reasoning continuity scope (F7).** Full Responses API migration, or
-  stateless reasoning replay on the existing Chat Completions path? The former is
-  the documented-recommended path and a larger change to `model/model.go`; the
-  latter is smaller and may be enough. Affects **T2.3**.
+  One sub-decision follows from it and was taken on architectural grounds rather
+  than asked: **stateless replay, not `previous_response_id`.** The Responses API
+  offers both. `previous_response_id` keeps conversation state on Meta's servers,
+  which would break the property the whole of this codebase is built on — that
+  everything durable lives in Postgres and a restart resumes from the last
+  boundary. It would also break Clear Conversation, which works by flipping
+  `in_context`, and would tie the transcript to opaque remote ids that can expire
+  under a run. So: `store: false`, `include: ["reasoning.encrypted_content"]`, and
+  reasoning items replayed out of Postgres. The `message.reasoning` column that
+  has existed and gone unused since the first migration is finally what carries it.
+
 - **D2 — Real UI verification.** Build headless-browser screenshots in the sandbox
   feeding multimodal calls, or accept a markup/CSS-only UI subagent that is blind
-  to rendered pixels like the primary agent already is? Affects **T4.2**.
+  to rendered pixels like the primary agent already is? Affects **T4.2**. Still
+  open; does not block anything before Turn 4.
 
 ---
 
@@ -111,6 +120,8 @@ work).
 
 ## Turn 2 — behaviour. The "it feels generic" turn.
 
+Transport work (T2.3–T2.5) is done. Prompt work (T2.1–T2.2, T2.6) is next.
+
 - [ ] **T2.1 — Prompt rework** (F20, F21, F22, F23)
   - Orientation pass on fresh conversations: read README, manifests, discover test
     and build commands, note conventions
@@ -120,11 +131,26 @@ work).
   - Require edge cases and deeper verification; remove the brevity ceiling
   - Somewhere to persist project facts across conversations
 - [ ] **T2.2 — Vocabulary cleanup** (F24) — remove dead "phase" language
-- [ ] **T2.3 — Reasoning continuity** (F7) — **blocked on D1.** Biggest single
-      change to how the agent feels
-- [ ] **T2.4 — Expose `reasoning_effort`** (F9) — direct lever for carefulness
-- [ ] **T2.5 — Default to `muse-spark-1.3-contributor`** (F8), refresh the
-      1.2-era assumptions documented in `model.go`
+- [x] **T2.3 — Reasoning continuity** (F7, F5) — **done.** Full migration to the
+      Responses API, stateless.
+  - `internal/model` now speaks `/v1/responses`. `messages` → `input` items,
+    system prompt → `instructions`, budget → `max_output_tokens`
+  - `store: false` + `include: ["reasoning.encrypted_content"]`, so the reasoning
+    blobs come back to us instead of living on Meta's servers
+  - Migration `002`: the unused `message.reasoning` text column is dropped and
+    replaced by `reasoning_items jsonb`. Reasoning items are persisted with the
+    assistant turn that produced them and replayed verbatim on later requests
+  - Item ordering within an assistant turn is reasoning → text → tool calls, so
+    the thinking precedes the decision it produced
+  - The reviewer gets continuity too, which matters much more now it has 24 turns
+  - Bonus, and it fixes the rest of F4: truncation is no longer inferred. The API
+    reports `incomplete_details.reason`, so `truncated` and a new `filtered` are
+    both trustworthy, and usage now breaks out `reasoning_tokens` explicitly
+- [x] **T2.4 — Expose `reasoning_effort`** (F9) — new `KindChoice` field kind
+      (validated select, not free text, so it cannot store a value the API
+      rejects). Blank = let the model decide. Applies to the agent and reviewer
+- [x] **T2.5 — Default to `muse-spark-1.3-contributor`** (F8); the 1.2-era
+      measurements in `model.go` are rewritten around this transport
 - [ ] **T2.6 — Decide the `done` / review gate** (F3)
 
 ## Turn 3 — the UI you want to look at.

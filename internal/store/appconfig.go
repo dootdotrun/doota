@@ -22,6 +22,15 @@ const (
 	KindInt      FieldKind = "int"
 	KindBool     FieldKind = "bool"
 
+	// KindChoice is a fixed set of values, rendered as a select and validated
+	// against Choices.
+	//
+	// A free-text field would let an operator store a value the endpoint rejects,
+	// and a rejected enum comes back as the same opaque 400 that made the output
+	// budget so hard to diagnose. If the set of valid values is known, the form
+	// should be the thing that knows it.
+	KindChoice FieldKind = "choice"
+
 	// KindSecret is a credential. It is stored like text and validated like text,
 	// but it is never rendered back to the browser: the Settings form shows only
 	// whether it is set, and an empty submission means "leave it alone" rather
@@ -38,6 +47,10 @@ type Field struct {
 	Help    string
 	Kind    FieldKind
 	Default any
+
+	// Choices is the accepted set for a KindChoice field, in display order. An
+	// empty string in the list is a legitimate "let the model decide".
+	Choices []string
 
 	// Max bounds a KindInt field. Zero means unbounded.
 	//
@@ -58,11 +71,12 @@ var ConfigGroups = []string{"Credentials", "Model", "Agent", "Sandbox", "Git"}
 // and a typo in a string literal would read as "not configured" rather than
 // failing loudly.
 const (
-	KeyModelAPIKey  = "model.api_key"
-	KeyModelBaseURL = "model.base_url"
-	KeyModelName    = "model.name"
-	KeySpriteToken  = "sprites.token"
-	KeyGitHubToken  = "github.token"
+	KeyModelAPIKey     = "model.api_key"
+	KeyModelBaseURL    = "model.base_url"
+	KeyModelName       = "model.name"
+	KeyReasoningEffort = "model.reasoning_effort"
+	KeySpriteToken     = "sprites.token"
+	KeyGitHubToken     = "github.token"
 
 	// KeySessionSecret is deliberately absent from ConfigFields. It is generated
 	// on first boot and never shown or typed, so putting it on the Settings form
@@ -110,8 +124,20 @@ var ConfigFields = []Field{
 	},
 	{
 		Key: KeyModelName, Group: "Model", Label: "Model", Kind: KindText,
-		Default: "muse-spark-1.2",
+		Default: "muse-spark-1.3-contributor",
 		Help:    "Model id sent to the API.",
+	},
+	{
+		Key: KeyReasoningEffort, Group: "Model", Label: "Reasoning effort", Kind: KindChoice,
+		// Mirrors model.Efforts, with a leading blank for "unset". Duplicated rather
+		// than imported for the same reason the role constants are: this layer
+		// describes a stored setting, that one describes a wire format.
+		Choices: []string{"", "minimal", "low", "medium", "high", "xhigh"},
+		// Empty lets the model pick its own depth, which is the documented default and
+		// a reasonable one. It is exposed because this is the most direct lever on how
+		// carefully the agent works, and it was previously not sent at all.
+		Default: "",
+		Help:    "Blank lets the model choose. Higher costs more tokens and thinks longer.",
 	},
 	{
 		Key: KeyModelBaseURL, Group: "Model", Label: "Base URL", Kind: KindText,
@@ -413,6 +439,13 @@ func ParseValue(f Field, raw string) (any, error) {
 		return n, nil
 	case KindBool:
 		return raw == "true" || raw == "on" || raw == "1", nil
+	case KindChoice:
+		for _, c := range f.Choices {
+			if raw == c {
+				return raw, nil
+			}
+		}
+		return nil, fmt.Errorf("%s must be one of: %s", f.Label, strings.Join(f.Choices, ", "))
 	case KindText, KindTextarea, KindSecret:
 		return raw, nil
 	default:

@@ -295,6 +295,7 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		APIKey: cfg.Secret(store.KeyModelAPIKey), BaseURL: cfg.Text(store.KeyModelBaseURL),
 		Model: cfg.Text(store.KeyModelName), System: system, Messages: toModelMessages(history),
 		Tools: toolSpecs(s.tools), MaxTokens: cfg.Int("model.max_output_tokens"),
+		ReasoningEffort: cfg.Text(store.KeyReasoningEffort),
 	}
 
 	s.setState(ctx, r.ProjectID, r.ID, StateThinking, fmt.Sprintf("step %d", r.StepCount+1))
@@ -319,7 +320,8 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		// Persist whatever arrived so a stream that dies late does not lose work.
 		if strings.TrimSpace(resp.Content) != "" {
 			msg, appendErr := s.store.AppendMessage(ctx, store.NewMessage{ProjectID: r.ProjectID, RunID: r.ID,
-				Role: model.RoleAssistant, Content: resp.Content, TokenCount: resp.Usage.CompletionTokens, Interrupted: true})
+				Role: model.RoleAssistant, Content: resp.Content, TokenCount: resp.Usage.CompletionTokens,
+				ReasoningItems: encodeReasoning(resp.Reasoning), Interrupted: true})
 			if appendErr != nil {
 				return false, appendErr
 			}
@@ -341,7 +343,8 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		}
 	}
 	assistant, err = s.store.AppendMessage(ctx, store.NewMessage{ProjectID: r.ProjectID, RunID: r.ID,
-		Role: model.RoleAssistant, Content: resp.Content, ToolCalls: encoded, TokenCount: resp.Usage.CompletionTokens})
+		Role: model.RoleAssistant, Content: resp.Content, ToolCalls: encoded,
+		TokenCount: resp.Usage.CompletionTokens, ReasoningItems: encodeReasoning(resp.Reasoning)})
 	if err != nil {
 		return false, err
 	}
@@ -830,12 +833,39 @@ func (s *Service) publishLive(eventType string, payload any) {
 	}
 }
 
+// encodeReasoning prepares reasoning items for storage.
+//
+// nil for a turn that produced none, so the column stays NULL rather than holding an
+// empty array — the difference between "this model does not return reasoning" and
+// "this turn happened not to have any" is worth being able to see in the database.
+func encodeReasoning(items []model.ReasoningItem) json.RawMessage {
+	if len(items) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// toModelMessages rebuilds the model's view of the conversation from the transcript.
+//
+// The reasoning items go back in here. That is the entire payoff of the Responses
+// API migration: without this the model re-derives its chain of thought on every
+// turn of a tool loop, spending the output budget on work it already did and losing
+// the thread of anything that takes more than one step.
 func toModelMessages(rows []*store.Message) []model.Message {
 	out := make([]model.Message, 0, len(rows))
 	for _, m := range rows {
 		msg := model.Message{Role: m.Role, Content: m.Content, ToolCallID: m.CallID()}
 		if m.HasToolCalls() {
 			_ = json.Unmarshal(m.ToolCalls, &msg.ToolCalls)
+		}
+		if m.HasReasoning() {
+			// A decode failure drops the reasoning rather than failing the turn: losing
+			// continuity costs quality, and refusing to build the request costs the run.
+			_ = json.Unmarshal(m.ReasoningItems, &msg.Reasoning)
 		}
 		out = append(out, msg)
 	}

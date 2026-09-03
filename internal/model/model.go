@@ -6,42 +6,66 @@
 // testable without knowing which client library is underneath, and swapping the
 // library should not be a change to the loop.
 //
-// # What the live API actually does
+// # Why the Responses API
 //
-// Measured against Muse Spark 1.2 on the Meta Model API, not assumed. Three
-// behaviours shape everything in this package:
+// This package used to speak Chat Completions. It does not any more, and the reason
+// is the single most consequential thing about running a reasoning model in a tool
+// loop.
 //
-// **It is a reasoning model, and the reasoning is invisible.** Usage comes back
-// with a large `reasoning_tokens` count, but the reasoning text is returned
-// nowhere — not on the non-streaming message, not as a stream delta. So there is
-// nothing to replay between turns. That closes an open question in the README: the
-// answer is not "the API rejects replayed reasoning", it is "there is no reasoning
-// content to replay". Extra fields sent on an assistant message are accepted and
-// silently ignored, so nothing breaks either way.
+// Muse Spark reasons before it emits anything, and that reasoning is the expensive
+// part of the call. On Chat Completions there is nowhere to put it: the transport
+// has no representation for reasoning state, so it is discarded at the end of every
+// request. In a tool loop that means the model thinks its way to a decision, calls a
+// tool, and then — on the very next request, with the tool result in hand — starts
+// again from nothing. Every turn re-derives the reasoning of the turn before it.
+//
+// The cost is not subtle. The output budget goes disproportionately to rebuilding
+// context the model already had, which makes a budget that should be ample run out
+// instead; and multi-step work is done by a model that keeps losing its own thread,
+// which reads as carelessness. Meta's documentation names the Responses API as the
+// recommended path for tool calling for exactly this reason: it preserves reasoning
+// across tool turns.
+//
+// # Stateless, not previous_response_id
+//
+// The Responses API offers two ways to keep that continuity. `previous_response_id`
+// threads turns server-side. This package deliberately does not use it.
+//
+// Everything durable in this application lives in Postgres, and a restart resumes a
+// run from its last boundary. Server-side conversation state breaks that: a response
+// id can expire underneath a paused run, Clear Conversation works by flipping
+// in_context rather than by telling a provider anything, and a transcript that can
+// only be replayed by quoting opaque remote ids is no longer a transcript this
+// application owns.
+//
+// So: Store is false, Include asks for `reasoning.encrypted_content`, and the
+// reasoning items come back to us, get persisted alongside the assistant turn that
+// produced them, and are replayed verbatim on the next request. The conversation
+// remains reconstructible from the database alone.
+//
+// # What the live API does
+//
+// Measured, not assumed. Two behaviours shape the code below:
 //
 // **The reasoning happens before any output, in silence.** A three-sentence answer
-// spent 830 of 935 completion tokens reasoning: 5.6 seconds of nothing, then all
-// the content in 0.2 seconds across seven chunks. A UI that only renders text
-// deltas therefore looks stalled for most of every call, which is why Handler has
-// an explicit OnStart and the chat screen shows a thinking state.
+// spent 830 of 935 completion tokens reasoning: several seconds of nothing, then all
+// the content at once. A UI that only renders text deltas therefore looks stalled
+// for most of every call, which is why Handler has an explicit OnStart and the chat
+// screen shows a thinking state.
 //
-// **The output budget has to cover reasoning as well as output, and running out
-// is disguised.** The budget is spent on reasoning first, so too small a budget
-// produces a successful call that said nothing. Worse, the two transports disagree
-// about how they say so:
+// **The output budget covers reasoning as well as visible output.** It is spent on
+// reasoning first, so too small a budget produces a successful call that said
+// nothing at all. Unlike Chat Completions — where that case was indistinguishable
+// from a normal one, arriving as finish_reason "stop" with no usage chunk — the
+// Responses API says so outright: status "incomplete" with an incomplete_details
+// reason of max_output_tokens, and a usage breakdown that counts reasoning tokens
+// separately. Response.SilentCause can therefore give an honest answer instead of a
+// guess.
 //
-//	non-streaming   finish_reason "length", content null, usage reported
-//	streaming       finish_reason "stop",   no content,   NO usage chunk at all
-//
-// So in streaming mode — which is the only mode this package uses — a starved call
-// can be indistinguishable from a normal one by finish_reason. Response.SilentCause
-// classifies what actually happened, because the alternative is a loop that spends
-// real money, records $0, and tells the operator the model had nothing to say.
-//
-// The budget travels as `max_completion_tokens`. `max_tokens` is the legacy field
-// and is documented as unsupported on reasoning models — sending it is a 400 with
-// an opaque "invalid parameters" body, which is close to undiagnosable from the
-// operator's side.
+// The budget travels as `max_output_tokens`. On Chat Completions this package sent
+// `max_tokens`, the legacy field, which is documented as unsupported on reasoning
+// models and was rejected with a bare "the request contains invalid parameters" that
+// named nothing.
 package model
 
 import (
@@ -56,8 +80,8 @@ import (
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
+	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
-	"github.com/openai/openai-go/shared/constant"
 )
 
 // MaxOutputTokens is the largest output budget the API will accept.
@@ -76,18 +100,45 @@ const (
 	RoleTool      = "tool"
 )
 
-// Finish reasons worth naming.
+// Reasoning effort levels, lowest to highest.
+//
+// Omitting the effort lets the model choose its own depth. Naming them here keeps
+// the valid set in one place, since the endpoint rejects anything else and this is
+// operator-editable configuration.
 const (
-	FinishStop      = "stop"
-	FinishToolCalls = "tool_calls"
-	FinishLength    = "length"
+	EffortMinimal = "minimal"
+	EffortLow     = "low"
+	EffortMedium  = "medium"
+	EffortHigh    = "high"
+	EffortXHigh   = "xhigh"
 )
 
+// Efforts is every accepted reasoning effort, in order.
+var Efforts = []string{EffortMinimal, EffortLow, EffortMedium, EffortHigh, EffortXHigh}
+
 // ToolCall is one function invocation the model asked for.
+//
+// ID is the API's call_id, which is what a result is addressed to. The Responses API
+// also gives each call an item id; that is not kept, because nothing needs it and
+// storing both invites using the wrong one.
 type ToolCall struct {
 	ID   string          `json:"id"`
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args"`
+}
+
+// ReasoningItem is one block of the model's retained chain of thought.
+//
+// Opaque by design. EncryptedContent is not readable by us and is not meant to be;
+// it is handed back verbatim so the model can pick up where it left off. Summary is
+// occasionally populated with a short human-readable gloss, kept only because
+// returning an item without the fields it arrived with is asking for trouble.
+//
+// Never rendered to the operator. It is state, not a message.
+type ReasoningItem struct {
+	ID               string   `json:"id"`
+	EncryptedContent string   `json:"encrypted_content,omitempty"`
+	Summary          []string `json:"summary,omitempty"`
 }
 
 // Message is one turn of the conversation as the model sees it.
@@ -95,6 +146,10 @@ type Message struct {
 	Role      string
 	Content   string
 	ToolCalls []ToolCall
+
+	// Reasoning is what the model was thinking when it produced this turn, to be
+	// replayed on later requests. Only ever set on an assistant turn.
+	Reasoning []ReasoningItem
 
 	// ToolCallID ties a RoleTool message back to the call it answers.
 	ToolCallID string
@@ -112,13 +167,15 @@ type ToolSpec struct {
 }
 
 // Usage is the token count for one call.
-//
-// Kept after cost accounting was removed because UsageReported — the fact that
-// the API said anything at all about tokens — is what Starved branches on, and
-// the counts themselves are useful in the call log.
 type Usage struct {
 	PromptTokens     int
 	CompletionTokens int
+
+	// ReasoningTokens is the part of CompletionTokens spent thinking rather than
+	// answering. Reported separately by this transport, and worth keeping: it is the
+	// difference between "the model had nothing to say" and "the model thought until
+	// the budget ran out", which used to be unanswerable.
+	ReasoningTokens int
 }
 
 // TotalTokens is the whole call's footprint.
@@ -140,6 +197,9 @@ type Request struct {
 	Messages  []Message
 	Tools     []ToolSpec
 	MaxTokens int
+
+	// ReasoningEffort is one of Efforts, or empty to let the model decide.
+	ReasoningEffort string
 }
 
 // Response is a completed call.
@@ -151,17 +211,20 @@ type Response struct {
 	Model        string
 	Latency      time.Duration
 
-	// Truncated means the API said the output budget ran out.
-	//
-	// Reliable on the non-streaming transport and effectively never set on the
-	// streaming one, which reports "stop" regardless. Kept because it is correct
-	// where it is reported and other providers do set it — but Starved is what to
-	// branch on here.
+	// Reasoning is the chain of thought to hand back on the next request. Persisting
+	// this and replaying it is the whole point of being on this transport.
+	Reasoning []ReasoningItem
+
+	// Truncated means the API said the output budget ran out. Reliable here: it comes
+	// from an explicit incomplete_details reason rather than being inferred.
 	Truncated bool
 
-	// UsageReported is false when the API sent no usage at all, which it does when
-	// the output budget is exhausted mid-reasoning. Distinguishes "this call was
-	// free" from "we were not told what this call cost".
+	// Filtered means the response was cut short by a content filter rather than by
+	// the budget. A different problem with a different remedy, and telling an
+	// operator to raise a limit would send them somewhere useless.
+	Filtered bool
+
+	// UsageReported is false when the API sent no usage at all.
 	UsageReported bool
 }
 
@@ -174,16 +237,16 @@ func (r *Response) Silent() bool {
 
 // SilentCause explains a response that came back with nothing to act on.
 //
-// Three causes, deliberately kept apart. This replaced a single Starved() predicate
+// The causes are deliberately kept apart. This replaced a single Starved() predicate
 // defined as "silent, and either truncated or missing usage", which collapsed every
-// empty stream — a dropped connection, a refusal, a rejected request — into one
-// report claiming the output budget had been consumed by reasoning.
+// empty stream — a dropped connection, a refusal — into one report claiming the
+// output budget had been consumed by reasoning.
 //
 // That mattered more than a wrong log line. The remedy printed alongside it was
-// "raise Max output tokens", so the one failure the operator could not actually fix
-// that way was the one they were told to fix that way, and raising the value past
-// the API's ceiling turns every later request into a 400. A cause that is not known
-// has to say so.
+// "raise Max output tokens", so the one failure the operator could not fix that way
+// was the one they were told to fix that way, and raising the value past the API
+// ceiling turns every later request into a 400. A cause that is not known has to say
+// so.
 type SilentCause string
 
 const (
@@ -192,6 +255,9 @@ const (
 
 	// SilentTruncated is the API stating outright that the budget ran out.
 	SilentTruncated SilentCause = "truncated"
+
+	// SilentFiltered is a content filter, not a budget.
+	SilentFiltered SilentCause = "filtered"
 
 	// SilentReasoning is tokens billed with nothing delivered: the budget was
 	// real, it was spent, and none of it reached us as content or a tool call.
@@ -208,6 +274,8 @@ func (r *Response) SilentCause() SilentCause {
 	switch {
 	case !r.Silent():
 		return NotSilent
+	case r.Filtered:
+		return SilentFiltered
 	case r.Truncated:
 		return SilentTruncated
 	case r.UsageReported && r.Usage.CompletionTokens > 0:
@@ -268,10 +336,6 @@ type Client struct {
 }
 
 // New builds a client for an OpenAI-compatible endpoint.
-//
-// The SDK's own retry handling is left at its default. Proper backoff with jitter
-// across the whole loop is Phase 5's job, and stacking a bespoke retry on top of
-// an SDK retry now would make the eventual attempt budget hard to reason about.
 func New(log *slog.Logger) *Client {
 	return &Client{log: log}
 }
@@ -312,6 +376,13 @@ const streamTimeout = 10 * time.Minute
 // Streaming is not for show. The alternative is a phone showing nothing for the
 // length of a long call, and the loop needing a timeout long enough to cover the
 // worst case with no way to tell slow from dead.
+//
+// Assembly is simpler than it was on Chat Completions. There, tool calls had to be
+// accumulated by index across chunks, because the first chunk for an index carried
+// the id and name and later ones appended argument fragments. Here the terminal
+// `response.completed` event carries the finished response — every output item, in
+// order, with usage — so the deltas are only for the live view and the result is
+// read from one authoritative payload.
 func (c *Client) Stream(ctx context.Context, req Request, h Handler) (*Response, error) {
 	if strings.TrimSpace(req.Model) == "" {
 		return nil, fmt.Errorf("model name is empty")
@@ -334,196 +405,273 @@ func (c *Client) Stream(ctx context.Context, req Request, h Handler) (*Response,
 	defer cancel()
 
 	started := time.Now()
-	stream := api.Chat.Completions.NewStreaming(ctx, params)
+	stream := api.Responses.NewStreaming(ctx, params)
 	defer stream.Close()
 
 	h.start()
 
-	var content strings.Builder
-	// Tool calls accumulate by the index the API assigns, which is how parallel
-	// calls stay separate: the first chunk for an index carries the id and name,
-	// later ones append argument fragments. Accumulated here rather than with the
-	// SDK's helper because the wire shape was verified directly and this is the one
-	// piece of the protocol the whole tool loop rests on.
-	type pending struct {
-		id, name  string
-		args      strings.Builder
-		announced bool
-	}
-	calls := map[int64]*pending{}
-	var order []int64
-
 	resp := &Response{Model: req.Model}
+	var text strings.Builder
+	// Tool call names are announced as their items appear, so the UI can say what is
+	// being called before the arguments have finished arriving.
+	announced := map[string]bool{}
+	var final *responses.Response
+	var streamErr error
 
 	for stream.Next() {
-		chunk := stream.Current()
+		event := stream.Current()
 
-		if chunk.Usage.TotalTokens > 0 || chunk.Usage.PromptTokens > 0 {
-			resp.UsageReported = true
-			resp.Usage = Usage{
-				PromptTokens:     int(chunk.Usage.PromptTokens),
-				CompletionTokens: int(chunk.Usage.CompletionTokens),
-			}
-		}
-		if chunk.Model != "" {
-			resp.Model = chunk.Model
-		}
-
-		for _, choice := range chunk.Choices {
-			if delta := choice.Delta.Content; delta != "" {
-				content.WriteString(delta)
+		switch event.Type {
+		case "response.output_text.delta":
+			if delta := event.Delta.OfString; delta != "" {
+				text.WriteString(delta)
 				h.text(delta)
 			}
-			for _, tc := range choice.Delta.ToolCalls {
-				p, seen := calls[tc.Index]
-				if !seen {
-					p = &pending{}
-					calls[tc.Index] = p
-					order = append(order, tc.Index)
-				}
-				if tc.ID != "" {
-					p.id = tc.ID
-				}
-				if tc.Function.Name != "" {
-					p.name = tc.Function.Name
-				}
-				if tc.Function.Arguments != "" {
-					p.args.WriteString(tc.Function.Arguments)
-				}
-				if !p.announced && p.name != "" {
-					p.announced = true
-					h.toolCall(p.name)
-				}
+
+		case "response.output_item.added":
+			if event.Item.Type == "function_call" && !announced[event.Item.ID] {
+				announced[event.Item.ID] = true
+				h.toolCall(event.Item.Name)
 			}
-			if choice.FinishReason != "" {
-				resp.FinishReason = choice.FinishReason
+
+		case "response.completed", "response.incomplete":
+			done := event.Response
+			final = &done
+
+		case "response.failed":
+			done := event.Response
+			final = &done
+			if done.Error.Message != "" {
+				streamErr = fmt.Errorf("model reported failure: %s", done.Error.Message)
+			} else {
+				streamErr = fmt.Errorf("model reported failure with no detail")
+			}
+
+		case "error":
+			// A transport-level error frame. The message is the only useful part.
+			if event.Message != "" {
+				streamErr = fmt.Errorf("model stream error: %s", event.Message)
+			} else {
+				streamErr = fmt.Errorf("model stream error with no detail")
 			}
 		}
 	}
+
+	resp.Content = text.String()
+	resp.Latency = time.Since(started)
 
 	if err := stream.Err(); err != nil {
-		// Partial output is returned to the caller in the error path's place: the
-		// loop persists what arrived and marks it interrupted, so a stream that
-		// dies late does not silently lose the model's work.
-		return &Response{
-			Content:      content.String(),
-			FinishReason: resp.FinishReason,
-			Usage:        resp.Usage,
-			Model:        resp.Model,
-			Latency:      time.Since(started),
-		}, fmt.Errorf("model stream: %w", err)
+		// Partial output is returned alongside the error: the loop persists what
+		// arrived and marks it interrupted, so a stream that dies late does not
+		// silently lose the model's work.
+		return resp, fmt.Errorf("model stream: %w", err)
+	}
+	if streamErr != nil {
+		if final != nil {
+			c.absorb(resp, final)
+		}
+		return resp, streamErr
+	}
+	if final == nil {
+		// The stream ended without a terminal event. Whatever text arrived is
+		// returned, and the caller treats a silent response on its merits.
+		return resp, fmt.Errorf("model stream ended without completing")
 	}
 
-	for _, idx := range order {
-		p := calls[idx]
-		if p.name == "" {
-			continue
-		}
-		args := json.RawMessage(strings.TrimSpace(p.args.String()))
-		if len(args) == 0 {
-			// An argument-less call is legal for a tool with no required fields, and
-			// an empty object is what every decoder downstream expects.
-			args = json.RawMessage("{}")
-		}
-		resp.ToolCalls = append(resp.ToolCalls, ToolCall{ID: p.id, Name: p.name, Args: args})
-	}
-
-	resp.Content = content.String()
-	resp.Latency = time.Since(started)
-	resp.Truncated = resp.FinishReason == FinishLength
+	c.absorb(resp, final)
 
 	c.log.Info("model call",
 		"model", resp.Model,
 		"finish_reason", resp.FinishReason,
 		"prompt_tokens", resp.Usage.PromptTokens,
 		"completion_tokens", resp.Usage.CompletionTokens,
+		"reasoning_tokens", resp.Usage.ReasoningTokens,
 		"tool_calls", len(resp.ToolCalls),
+		"reasoning_items", len(resp.Reasoning),
+		"truncated", resp.Truncated,
 		"latency_ms", resp.Latency.Milliseconds(),
 	)
 	return resp, nil
 }
 
-// params converts a Request into the SDK's shape.
-func (c *Client) params(req Request) (openai.ChatCompletionNewParams, error) {
-	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages)+1)
-	if s := strings.TrimSpace(req.System); s != "" {
-		msgs = append(msgs, openai.SystemMessage(s))
+// absorb reads the terminal response payload into our own shape.
+//
+// Content is taken from the accumulated deltas rather than from the output items:
+// they agree, and preferring the deltas means a response whose terminal event is
+// malformed still returns the text the operator already watched arrive.
+func (c *Client) absorb(resp *Response, final *responses.Response) {
+	if final.Model != "" {
+		resp.Model = final.Model
+	}
+	resp.FinishReason = string(final.Status)
+
+	switch final.IncompleteDetails.Reason {
+	case "max_output_tokens":
+		resp.Truncated = true
+	case "content_filter":
+		resp.Filtered = true
 	}
 
-	for _, m := range req.Messages {
-		switch m.Role {
-		case RoleUser:
-			msgs = append(msgs, openai.UserMessage(m.Content))
-
-		case RoleAssistant:
-			if len(m.ToolCalls) == 0 {
-				msgs = append(msgs, openai.AssistantMessage(m.Content))
-				break
-			}
-			// An assistant turn that called tools has to carry the calls back, or the
-			// tool results that follow it have nothing to attach to and the API
-			// rejects the request.
-			assistant := openai.ChatCompletionAssistantMessageParam{
-				ToolCalls: make([]openai.ChatCompletionMessageToolCallParam, 0, len(m.ToolCalls)),
-			}
-			if m.Content != "" {
-				assistant.Content.OfString = param.NewOpt(m.Content)
-			}
-			for _, tc := range m.ToolCalls {
-				assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallParam{
-					ID:   tc.ID,
-					Type: constant.Function("function"),
-					Function: openai.ChatCompletionMessageToolCallFunctionParam{
-						Name:      tc.Name,
-						Arguments: string(tc.Args),
-					},
-				})
-			}
-			msgs = append(msgs, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
-
-		case RoleTool:
-			msgs = append(msgs, openai.ToolMessage(m.Content, m.ToolCallID))
-
-		case RoleSystem:
-			msgs = append(msgs, openai.SystemMessage(m.Content))
-
-		default:
-			return openai.ChatCompletionNewParams{}, fmt.Errorf("unknown message role %q", m.Role)
+	if final.Usage.TotalTokens > 0 || final.Usage.InputTokens > 0 {
+		resp.UsageReported = true
+		resp.Usage = Usage{
+			PromptTokens:     int(final.Usage.InputTokens),
+			CompletionTokens: int(final.Usage.OutputTokens),
+			ReasoningTokens:  int(final.Usage.OutputTokensDetails.ReasoningTokens),
 		}
 	}
 
-	params := openai.ChatCompletionNewParams{
-		Model:         shared.ChatModel(req.Model),
-		Messages:      msgs,
-		StreamOptions: openai.ChatCompletionStreamOptionsParam{IncludeUsage: param.NewOpt(true)},
+	for _, item := range final.Output {
+		switch item.Type {
+		case "reasoning":
+			r := ReasoningItem{ID: item.ID, EncryptedContent: item.EncryptedContent}
+			for _, s := range item.Summary {
+				if s.Text != "" {
+					r.Summary = append(r.Summary, s.Text)
+				}
+			}
+			// An item with neither an encrypted blob nor a summary carries nothing to
+			// replay, and sending a hollow one back is a request the API may reject.
+			if r.EncryptedContent != "" || len(r.Summary) > 0 {
+				resp.Reasoning = append(resp.Reasoning, r)
+			}
+
+		case "function_call":
+			args := json.RawMessage(strings.TrimSpace(item.Arguments))
+			if len(args) == 0 {
+				// An argument-less call is legal for a tool with no required fields, and
+				// an empty object is what every decoder downstream expects.
+				args = json.RawMessage("{}")
+			}
+			resp.ToolCalls = append(resp.ToolCalls, ToolCall{ID: item.CallID, Name: item.Name, Args: args})
+
+		case "message":
+			// Deltas already gave us this. Used only as a fallback for a response that
+			// somehow delivered no deltas at all.
+			if strings.TrimSpace(resp.Content) == "" {
+				var b strings.Builder
+				for _, part := range item.Content {
+					b.WriteString(part.Text)
+				}
+				resp.Content = b.String()
+			}
+		}
 	}
-	// max_completion_tokens, never max_tokens. The latter is the legacy field, is
-	// documented as unsupported on reasoning models, and this endpoint rejects it
-	// with a bare "The request contains invalid parameters" — no mention of which
-	// parameter. Clamped as well as named, because the ceiling is likewise only
-	// discoverable as that same opaque 400.
+}
+
+// params converts a Request into the SDK's shape.
+func (c *Client) params(req Request) (responses.ResponseNewParams, error) {
+	input, err := inputItems(req.Messages)
+	if err != nil {
+		return responses.ResponseNewParams{}, err
+	}
+
+	params := responses.ResponseNewParams{
+		Model: shared.ResponsesModel(req.Model),
+		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: input},
+
+		// The reasoning blobs have to come back to us or there is nothing to replay,
+		// and nothing is kept server-side. See the package doc on why not
+		// previous_response_id.
+		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
+		Store:   param.NewOpt(false),
+	}
+
+	// The system prompt is instructions rather than an input item. Kept out of the
+	// item list so it cannot be mistaken for a turn, and so the whole prompt can be
+	// swapped between requests without rewriting history.
+	if s := strings.TrimSpace(req.System); s != "" {
+		params.Instructions = param.NewOpt(s)
+	}
+
+	// Clamped as well as bounded at the form, because the ceiling is otherwise only
+	// discoverable as an opaque 400 and a value stored before the bound existed
+	// would keep failing.
 	if req.MaxTokens > 0 {
 		budget := req.MaxTokens
 		if budget > MaxOutputTokens {
 			budget = MaxOutputTokens
 		}
-		params.MaxCompletionTokens = param.NewOpt(int64(budget))
+		params.MaxOutputTokens = param.NewOpt(int64(budget))
+	}
+
+	if effort := strings.TrimSpace(req.ReasoningEffort); effort != "" {
+		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffort(effort)}
 	}
 
 	for _, t := range req.Tools {
 		var schema map[string]any
 		if len(t.Parameters) > 0 {
 			if err := json.Unmarshal(t.Parameters, &schema); err != nil {
-				return openai.ChatCompletionNewParams{}, fmt.Errorf("tool %s has an invalid parameter schema: %w", t.Name, err)
+				return responses.ResponseNewParams{}, fmt.Errorf("tool %s has an invalid parameter schema: %w", t.Name, err)
 			}
 		}
-		params.Tools = append(params.Tools, openai.ChatCompletionToolParam{
-			Function: shared.FunctionDefinitionParam{
-				Name:        t.Name,
-				Description: param.NewOpt(t.Description),
-				Parameters:  shared.FunctionParameters(schema),
-			},
-		})
+		fn := responses.FunctionToolParam{
+			Name:       t.Name,
+			Parameters: schema,
+			// Strict schema validation is off because these schemas are hand-written for
+			// a model to read, and strict mode additionally requires every property to be
+			// listed as required — which would make every optional tool argument
+			// mandatory.
+			Strict: param.NewOpt(false),
+		}
+		if t.Description != "" {
+			fn.Description = param.NewOpt(t.Description)
+		}
+		params.Tools = append(params.Tools, responses.ToolUnionParam{OfFunction: &fn})
 	}
+
 	return params, nil
+}
+
+// inputItems flattens the conversation into the API's item list.
+//
+// One message can become several items, and the order within a turn matters: the
+// reasoning that produced a decision has to precede the decision. So an assistant
+// turn expands to its reasoning items, then its text, then its tool calls.
+func inputItems(messages []Message) ([]responses.ResponseInputItemUnionParam, error) {
+	out := make([]responses.ResponseInputItemUnionParam, 0, len(messages)+4)
+
+	for _, m := range messages {
+		switch m.Role {
+		case RoleUser:
+			out = append(out, responses.ResponseInputItemParamOfMessage(m.Content, responses.EasyInputMessageRoleUser))
+
+		case RoleSystem:
+			out = append(out, responses.ResponseInputItemParamOfMessage(m.Content, responses.EasyInputMessageRoleSystem))
+
+		case RoleAssistant:
+			for _, r := range m.Reasoning {
+				summary := make([]responses.ResponseReasoningItemSummaryParam, 0, len(r.Summary))
+				for _, s := range r.Summary {
+					summary = append(summary, responses.ResponseReasoningItemSummaryParam{Text: s})
+				}
+				item := responses.ResponseInputItemParamOfReasoning(r.ID, summary)
+				if r.EncryptedContent != "" {
+					item.OfReasoning.EncryptedContent = param.NewOpt(r.EncryptedContent)
+				}
+				out = append(out, item)
+			}
+			if strings.TrimSpace(m.Content) != "" {
+				out = append(out, responses.ResponseInputItemParamOfMessage(m.Content, responses.EasyInputMessageRoleAssistant))
+			}
+			// An assistant turn that called tools has to carry the calls back, or the
+			// tool results that follow have nothing to attach to and the API rejects
+			// the request.
+			for _, tc := range m.ToolCalls {
+				args := string(tc.Args)
+				if strings.TrimSpace(args) == "" {
+					args = "{}"
+				}
+				out = append(out, responses.ResponseInputItemParamOfFunctionCall(args, tc.ID, tc.Name))
+			}
+
+		case RoleTool:
+			out = append(out, responses.ResponseInputItemParamOfFunctionCallOutput(m.ToolCallID, m.Content))
+
+		default:
+			return nil, fmt.Errorf("unknown message role %q", m.Role)
+		}
+	}
+	return out, nil
 }

@@ -73,6 +73,12 @@
                   effect.
                 </p>
               {{end}}
+            {{else if eq .Kind "choice"}}
+              <select id="{{.Key}}" name="{{.Key}}">
+                {{range .Options}}
+                  <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+                {{end}}
+              </select>
             {{else if eq .Kind "int"}}
               <input id="{{.Key}}" name="{{.Key}}" type="number" inputmode="numeric" value="{{.Value}}">
             {{else}}
