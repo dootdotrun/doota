@@ -61,10 +61,29 @@ Severity: **S1** breaks the tool · **S2** degrades it badly · **S3** friction/
   reasoning items replayed out of Postgres. The `message.reasoning` column that
   has existed and gone unused since the first migration is finally what carries it.
 
-- **D2 — Real UI verification.** Build headless-browser screenshots in the sandbox
-  feeding multimodal calls, or accept a markup/CSS-only UI subagent that is blind
-  to rendered pixels like the primary agent already is? Affects **T4.2**. Still
-  open; does not block anything before Turn 4.
+- **D2 — Real UI verification. ✅ DECIDED: headless browser and real screenshots.**
+  A subagent reading markup and CSS is not worth building; the whole point is to
+  catch what only shows up once rendered.
+
+  Design notes that follow from it:
+
+  - **Chromium runs in the sandbox, not here.** The dev server the agent starts is
+    on `localhost:<port>` inside the sandbox, so that is where the browser has to
+    be. It also keeps the app's own machine free of a browser install.
+  - **Screenshots come back through `Sandbox.ReadFile`**, not base64 through
+    stdout. `bash` output is capped at 30KB and a screenshot is an order of
+    magnitude larger; `ReadFile` already exists and has no such cap.
+  - **Only the subagent sees the images.** A tool result on the Responses API is a
+    string, so the primary agent cannot be handed a picture — it gets the
+    reviewer's written findings. That is the division asked for anyway: the primary
+    agent starts the server and says where it is, the subagent looks.
+  - **Viewport captures, not full-page.** Full-page needs CDP; `--screenshot`
+    captures the viewport. Phone and desktop viewports are what "does this button
+    look right" actually depends on, and the tool says plainly that it is
+    viewport-only rather than pretending otherwise.
+  - **Self-healing install.** The setup script installs Chromium, but it only runs
+    at project creation, so existing sandboxes have none. The tool detects that and
+    says exactly how to fix it instead of failing opaquely.
 
 ---
 
@@ -231,12 +250,53 @@ work).
       The footer now reads e.g. `muse-spark-1.3-contributor · 250k / 1048k · 23%`,
       taken from the API's own accounting on the last call rather than estimated.
 
-## Turn 4 — the UI/UX subagent.
+## Turn 4 — the UI/UX subagent, with eyes. ✅ DONE
 
-- [ ] **T4.1 — Subagent** — `agent.runReview` is the working template. Two roles:
-      design-schema advisor consulted *before* implementation, and UI guard
-      running *after* the semantic reviewer
-- [ ] **T4.2 — Real verification** — **blocked on D2**
+Built bottom-up: capability first, then the agent that uses it, then the gate that
+makes it non-optional.
+
+- [x] **T4.1 — Image input in `internal/model`.** `Message.Images` carries raw bytes
+      (not pre-built data URLs, so one place knows the encoding) and becomes
+      `input_image` content parts at detail `high` — low detail is exactly what would
+      smooth away the misalignment and clipping worth catching. Refused before
+      sending if empty or over 5MB, since that returns as an opaque payload error
+- [x] **T4.2 — `screenshot` tool.** Headless Chromium **inside the sandbox**, because
+      the dev server it photographs is on `localhost:<port>` in there. Bytes come back
+      via `Sandbox.ReadFile`, not base64 through stdout — command output is capped at
+      30KB and every capture would have been silently truncated into a corrupt PNG.
+      `--no-sandbox` and `--disable-dev-shm-usage` because Chromium's own sandbox
+      needs privileges a container lacks and `/dev/shm` is usually tiny.
+      Labels are sanitised, because a label becomes a filename and `../` would write
+      outside the capture directory
+- [x] **T4.3 — The subagent** (`agent/uireview.go`), modelled on `runReview`: own
+      history, own registry, budget of 20, warning at 3, **tools withheld on the last
+      turn** so a verdict always arrives. Captures phone (390×844) and desktop
+      (1440×900). A screenshot it takes mid-review is attached as a following user
+      turn, because a tool result on this transport is text
+- [x] **T4.4 — `ui_review` control tool**, executed by the runner exactly like
+      `review`. Two modes: `design` before building (returns a brief with real units,
+      states, and responsive behaviour), `verify` after (returns defects or CLEAN)
+- [x] **T4.5 — The gate.** `done` requires a concluded `ui_review` when the diff
+      touches files that can *look* wrong without *being* wrong — templates,
+      stylesheets, component files. Deliberately not every front-end file: a lockfile
+      cannot move a button, and a guard that fires on everything is one to resent.
+      Non-trapping on the same terms as T2.6
+- [x] **T4.6 — Chromium in the setup script** (POSIX-safe, reported separately in the
+      provision log because a missing browser disables one feature rather than
+      breaking something general), plus a transcript card that distinguishes a design
+      brief from a verify verdict
+
+Two things found while building this, both fixed:
+
+- **`screenshot` validated its arguments after looking up the sandbox**, so a missing
+  label surfaced as "no sandbox available" — an infrastructure error, which strands
+  the whole run, for something the model could have corrected from a one-line result.
+  Arguments are checked first now.
+- **Migration 005 finds the old `kind` CHECK constraint in the catalog** rather than
+  dropping it by name. It was declared inline in `CREATE TABLE`, so Postgres named it;
+  a `DROP CONSTRAINT IF EXISTS` guessing wrong would have succeeded silently and left
+  the original still rejecting `ui_review`. The symptom would have been a run stranded
+  on its first UI review, a long way from the cause.
 
 ---
 

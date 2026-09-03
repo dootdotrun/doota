@@ -6,6 +6,26 @@
       <span class="turn-time">{{.At}}</span>
     </div>
 
+  {{else if and (eq .Kind "ui_review") .UIReview}}
+    {{/*
+      The UI subagent. Rendered open like the semantic review, and labelled by which
+      job it did — a design brief is instructions the agent is about to follow, a
+      verify pass is what was actually wrong on screen.
+    */}}
+    <section class="turn review-card{{if .UIReview.Clean}} review-clean-card{{end}}" data-message-id="{{.ID}}">
+      <div class="review-head">
+        <strong>{{if .UIReview.Design}}Design brief{{else}}UI review{{end}}</strong>
+        {{if .UIReview.Design}}
+          <span class="pill pill-idle">design</span>
+        {{else if .UIReview.Clean}}
+          <span class="pill pill-ok">clean</span>
+        {{else}}
+          <span class="pill pill-err">findings</span>
+        {{end}}
+      </div>
+      <div class="review-findings prose">{{.UIReview.Findings}}</div>
+    </section>
+
   {{else if and (eq .Kind "review") .Review}}
     <section class="turn review-card{{if .Review.Clean}} review-clean-card{{end}}" data-message-id="{{.ID}}">
       <div class="review-head"><strong>Independent review</strong><span class="pill {{if .Review.Clean}}pill-ok{{else}}pill-err{{end}}">{{if .Review.Clean}}clean{{else}}findings{{end}}</span></div>

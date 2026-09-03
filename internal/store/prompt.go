@@ -136,7 +136,10 @@ install_pkgs() {
 # A space-separated string rather than an array: word splitting is exactly the
 # behaviour wanted at the call site, and unlike an array it is portable.
 need=""
-for pair in git:git curl:curl rg:ripgrep; do
+# chromium is here for ui_review, which photographs the running app with a real
+# browser. It is the largest thing installed by a wide margin, and it is worth it:
+# without it nothing in the system can see rendered output at all.
+for pair in git:git curl:curl rg:ripgrep chromium:chromium; do
   bin=${pair%%:*}
   pkg=${pair#*:}
   command -v "${bin}" >/dev/null 2>&1 || need="${need} ${pkg}"
@@ -175,6 +178,16 @@ if command -v curl >/dev/null 2>&1; then
   echo "curl: $(curl --version | head -1)"
 else
   echo "curl: MISSING"
+fi
+# Reported separately because a missing browser disables ui_review specifically,
+# rather than breaking something general, and the remedy is a package install the
+# agent can perform itself.
+if command -v chromium >/dev/null 2>&1; then
+  echo "chromium: $(chromium --version 2>&1 | head -1)"
+elif command -v chromium-browser >/dev/null 2>&1; then
+  echo "chromium: $(chromium-browser --version 2>&1 | head -1)"
+else
+  echo "chromium: MISSING - ui_review cannot take screenshots until one is installed"
 fi
 # No binary to check, so ask the package manager where there is one to ask.
 if command -v dpkg >/dev/null 2>&1; then

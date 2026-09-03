@@ -30,10 +30,24 @@ func (s *Store) ReviewAttempted(ctx context.Context, runID string) (bool, error)
 // CLEAN or listed findings. An errored review is one that could not finish: no diff,
 // a broken reviewer, a stream that died.
 func (s *Store) ReviewOutcomes(ctx context.Context, runID string) (attempts int, concluded bool, err error) {
+	return s.toolOutcomes(ctx, runID, "review")
+}
+
+// UIReviewOutcomes is the same question for the UI reviewer.
+//
+// Counted separately from the semantic review because they answer different
+// questions: one says the code is sound, the other says the screen is. A change that
+// touches the interface needs both, and a run that passed one is not covered for the
+// other.
+func (s *Store) UIReviewOutcomes(ctx context.Context, runID string) (attempts int, concluded bool, err error) {
+	return s.toolOutcomes(ctx, runID, "ui_review")
+}
+
+func (s *Store) toolOutcomes(ctx context.Context, runID, tool string) (attempts int, concluded bool, err error) {
 	row := s.DB.QueryRowContext(ctx, `SELECT count(*), coalesce(bool_or(NOT is_error), false)
-		FROM tool_call_log WHERE run_id = $1 AND tool_name = 'review'`, runID)
+		FROM tool_call_log WHERE run_id = $1 AND tool_name = $2`, runID, tool)
 	if err := row.Scan(&attempts, &concluded); err != nil {
-		return 0, false, fmt.Errorf("check review outcomes: %w", err)
+		return 0, false, fmt.Errorf("check %s outcomes: %w", tool, err)
 	}
 	return attempts, concluded, nil
 }

@@ -38,12 +38,13 @@ type messageView struct {
 	HTML template.HTML
 
 	// Tool-result fields.
-	Tool    string
-	Diff    *diffView
-	Review  *reviewView
-	Ship    *shipView
-	Summary string
-	IsError bool
+	Tool     string
+	Diff     *diffView
+	Review   *reviewView
+	UIReview *uiReviewView
+	Ship     *shipView
+	Summary  string
+	IsError  bool
 }
 
 // shipView is the payoff of a finished task: what to look at now.
@@ -54,6 +55,18 @@ type shipView struct {
 }
 
 type reviewView struct {
+	Clean    bool
+	Findings template.HTML
+}
+
+// uiReviewView is the UI subagent's output.
+//
+// Distinct from reviewView because the two are not the same thing and reading them as
+// one would hide which check actually ran: a design brief is instructions to follow, a
+// verify pass is defects to fix, and a clean semantic review says nothing about
+// whether the screen looks right.
+type uiReviewView struct {
+	Design   bool
 	Clean    bool
 	Findings template.HTML
 }
@@ -423,6 +436,7 @@ func renderMessages(msgs []*store.Message) []messageView {
 			v.Summary, v.IsError = summariseToolResult(m)
 			v.Diff = extractDiff(m)
 			v.Review = extractReview(m)
+			v.UIReview = extractUIReview(m)
 			// Only a done result that actually shipped is treated as prose rather
 			// than as command output. It is the end of the task, and the markdown
 			// renderer has Linkify enabled, which makes the pull request URL
@@ -584,6 +598,25 @@ func extractReview(m *store.Message) *reviewView {
 	// Review findings are prose from the reviewer model, which writes them as a
 	// markdown list with file references in backticks.
 	return &reviewView{Clean: display.Clean, Findings: renderMarkdown(display.Findings)}
+}
+
+func extractUIReview(m *store.Message) *uiReviewView {
+	if m.MessageKind() != store.KindUIReview || !m.Display() {
+		return nil
+	}
+	var display struct {
+		Mode     string `json:"mode"`
+		Findings string `json:"findings"`
+		Clean    bool   `json:"clean"`
+	}
+	if json.Unmarshal(m.ToolDisplay, &display) != nil || display.Findings == "" {
+		return nil
+	}
+	return &uiReviewView{
+		Design:   display.Mode == "design",
+		Clean:    display.Clean,
+		Findings: renderMarkdown(display.Findings),
+	}
 }
 
 // clip keeps a compact one-line tool summary from consuming the transcript.

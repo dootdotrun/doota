@@ -70,6 +70,7 @@ package model
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -150,11 +151,46 @@ type ReasoningItem struct {
 	Summary          []string `json:"summary,omitempty"`
 }
 
+// Image is a picture attached to a user turn.
+//
+// Raw bytes rather than a pre-built data URL, so exactly one place knows how the
+// encoding works and callers cannot get it subtly wrong.
+//
+// Only user turns carry these. The model can be shown a screenshot; it cannot send
+// one back, and a tool result on this transport is a string — so a tool that captures
+// an image has to hand back a path, and whoever builds the next request attaches it.
+// That is why the UI reviewer takes its own screenshots instead of reading them out
+// of a tool result.
+type Image struct {
+	// MIME is the image type, e.g. "image/png". Defaults to image/png when empty.
+	MIME string
+	Data []byte
+}
+
+// MaxImageBytes bounds one attached image.
+//
+// A viewport screenshot of a web page is usually 100–400KB. Anything past this is
+// either a mistake or a full-page capture of something enormous, and it would arrive
+// as an opaque request-too-large rather than as anything actionable.
+const MaxImageBytes = 5 << 20
+
+// dataURL renders the image for the wire.
+func (i Image) dataURL() string {
+	mime := i.MIME
+	if mime == "" {
+		mime = "image/png"
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(i.Data)
+}
+
 // Message is one turn of the conversation as the model sees it.
 type Message struct {
 	Role      string
 	Content   string
 	ToolCalls []ToolCall
+
+	// Images are attached to a user turn, in order, after its text.
+	Images []Image
 
 	// Reasoning is what the model was thinking when it produced this turn, to be
 	// replayed on later requests. Only ever set on an assistant turn.
@@ -644,6 +680,14 @@ func inputItems(messages []Message) ([]responses.ResponseInputItemUnionParam, er
 	for _, m := range messages {
 		switch m.Role {
 		case RoleUser:
+			if len(m.Images) > 0 {
+				item, err := imageMessage(m)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, item)
+				break
+			}
 			out = append(out, responses.ResponseInputItemParamOfMessage(m.Content, responses.EasyInputMessageRoleUser))
 
 		case RoleSystem:
@@ -683,4 +727,30 @@ func inputItems(messages []Message) ([]responses.ResponseInputItemUnionParam, er
 		}
 	}
 	return out, nil
+}
+
+// imageMessage builds a user turn carrying text and one or more images.
+//
+// Detail is high rather than auto. The whole reason images are here is a reviewer
+// looking for misalignment, clipped text, and wrong spacing, and low-detail encoding
+// is exactly what would smooth those away. It costs more tokens per image, which is
+// the correct trade for this job.
+func imageMessage(m Message) (responses.ResponseInputItemUnionParam, error) {
+	content := make(responses.ResponseInputMessageContentListParam, 0, len(m.Images)+1)
+	if strings.TrimSpace(m.Content) != "" {
+		content = append(content, responses.ResponseInputContentParamOfInputText(m.Content))
+	}
+	for _, img := range m.Images {
+		if len(img.Data) == 0 {
+			return responses.ResponseInputItemUnionParam{}, fmt.Errorf("an attached image has no data")
+		}
+		if len(img.Data) > MaxImageBytes {
+			return responses.ResponseInputItemUnionParam{}, fmt.Errorf(
+				"an attached image is %d bytes, over the %d limit", len(img.Data), MaxImageBytes)
+		}
+		part := responses.ResponseInputContentParamOfInputImage(responses.ResponseInputImageDetailHigh)
+		part.OfInputImage.ImageURL = param.NewOpt(img.dataURL())
+		content = append(content, part)
+	}
+	return responses.ResponseInputItemParamOfInputMessage(content, string(responses.EasyInputMessageRoleUser)), nil
 }

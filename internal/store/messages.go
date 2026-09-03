@@ -27,6 +27,7 @@ const (
 const (
 	KindPlan     = "plan"
 	KindReview   = "review"
+	KindUIReview = "ui_review"
 	KindAskHuman = "ask_human"
 	KindNotice   = "notice"
 )

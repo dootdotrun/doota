@@ -126,7 +126,8 @@ func run(log *slog.Logger) error {
 	registry := tools.Primary()
 	modelClient := model.New(log)
 	reviewer := tools.Reviewer()
-	agents := agent.New(st, projects, modelClient, registry, reviewer, hub, log)
+	uiReviewer := tools.UIReviewer()
+	agents := agent.New(st, projects, modelClient, registry, reviewer, uiReviewer, hub, log)
 	if err := agents.Recover(ctx); err != nil {
 		return fmt.Errorf("recover interrupted runs: %w", err)
 	}

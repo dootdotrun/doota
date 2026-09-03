@@ -87,14 +87,15 @@ func (w *worker) cancelAll() {
 
 // Service runs the loop.
 type Service struct {
-	store    *store.Store
-	projects *project.Service
-	model    *model.Client
-	tools    *tools.Registry
-	reviewer *tools.Registry
-	shipping *tools.Registry
-	hub      *events.Hub
-	log      *slog.Logger
+	store      *store.Store
+	projects   *project.Service
+	model      *model.Client
+	tools      *tools.Registry
+	reviewer   *tools.Registry
+	uiReviewer *tools.Registry
+	shipping   *tools.Registry
+	hub        *events.Hub
+	log        *slog.Logger
 
 	mu      sync.Mutex
 	workers map[string]*worker // keyed by run id
@@ -102,9 +103,10 @@ type Service struct {
 }
 
 func New(st *store.Store, projects *project.Service, client *model.Client,
-	registry, reviewer *tools.Registry, hub *events.Hub, log *slog.Logger) *Service {
+	registry, reviewer, uiReviewer *tools.Registry, hub *events.Hub, log *slog.Logger) *Service {
 	return &Service{
-		store: st, projects: projects, model: client, tools: registry, reviewer: reviewer,
+		store: st, projects: projects, model: client, tools: registry,
+		reviewer: reviewer, uiReviewer: uiReviewer,
 		shipping: tools.Shipping(),
 		hub:      hub, log: log,
 		workers: map[string]*worker{},
@@ -426,13 +428,20 @@ func (s *Service) executeCalls(ctx context.Context, r *store.Run, p *store.Proje
 			}
 		}
 
-		// review is executed by the runner because it needs the model client.
+		// The reviewers are executed by the runner because they need the model client.
 		if !result.IsError && call.Name == "review" {
 			request, ok := result.Display.(tools.ReviewRequest)
 			if !ok {
 				return fmt.Errorf("review returned an invalid request")
 			}
 			result = s.runReview(ctx, p, cfg, sb, r.ID, assistant.ID, pad, request)
+		}
+		if !result.IsError && call.Name == "ui_review" {
+			request, ok := result.Display.(tools.UIReviewRequest)
+			if !ok {
+				return fmt.Errorf("ui_review returned an invalid request")
+			}
+			result = s.runUIReview(ctx, p, cfg, sb, r.ID, assistant.ID, pad, request)
 		}
 
 		var display json.RawMessage
@@ -445,6 +454,8 @@ func (s *Service) executeCalls(ctx context.Context, r *store.Run, p *store.Proje
 			kind = store.KindAskHuman
 		case "review":
 			kind = store.KindReview
+		case "ui_review":
+			kind = store.KindUIReview
 		}
 		in := store.NewMessage{ProjectID: p.ID, RunID: r.ID, Role: model.RoleTool, Kind: kind,
 			Content: result.Content, ToolCallID: call.ID, ToolName: call.Name, ToolDisplay: display}
@@ -620,6 +631,44 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 		return msg, nil, appendErr
 	}
 
+	// A change to the interface needs someone who can see it.
+	//
+	// Gated on the diff actually touching UI files, because most changes do not and a
+	// blanket requirement would be a tax on every backend fix. The agent's own prompt
+	// admits it cannot see rendered pixels, so for the changes where that matters this
+	// is the only check in the system that can catch a button off the edge of a phone
+	// screen — which is exactly the work that was being handed back to the operator to
+	// notice.
+	//
+	// Non-trapping on the same terms as the review above.
+	if touched, files, uiErr := s.uiTouched(ctx, env); uiErr == nil && touched {
+		uiAttempts, uiConcluded, err := s.store.UIReviewOutcomes(ctx, r.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch {
+		case uiAttempts == 0:
+			msg, appendErr := s.store.AppendMessage(ctx, in(
+				"This change touches the interface ("+files+"), and you cannot see rendered pixels. "+
+					"Start the app with bash_bg and call ui_review with mode \"verify\" and its URL, so a "+
+					"reviewer that can see it checks the phone and desktop layouts. Fix what it finds, "+
+					"then call done again.",
+				map[string]any{"summary": request.Summary}))
+			return msg, nil, appendErr
+		case !uiConcluded && uiAttempts < 2:
+			msg, appendErr := s.store.AppendMessage(ctx, in(
+				"The UI review did not reach a verdict, so the interface has not actually been looked at. "+
+					"Call ui_review again. If it fails the same way twice, say so in your summary and "+
+					"call done — but do not describe the UI as checked.",
+				map[string]any{"summary": request.Summary}))
+			return msg, nil, appendErr
+		}
+	} else if uiErr != nil {
+		// Not fatal. Failing to classify the diff should not block shipping; it just
+		// means this particular guard did not fire.
+		s.log.Error("classify diff for ui review", "run_id", r.ID, "error", uiErr)
+	}
+
 	pushArgs, _ := json.Marshal(map[string]bool{"force_with_lease": false})
 	push, err := s.shipping.Execute(ctx, "git_push", pushArgs, env)
 	if err != nil {
@@ -673,6 +722,66 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 	// is deferred for as long as the composer holds text or focus.
 	s.setState(ctx, r.ProjectID, r.ID, StateDone, "shipped")
 	return msg, finished, nil
+}
+
+// uiExtensions are the file types whose changes can look wrong without being wrong.
+//
+// Templates, stylesheets, and component files. Deliberately not every file a
+// front-end project contains: a change to a JSON fixture or a lockfile cannot move a
+// button, and requiring a visual review for it would make the guard something to
+// resent rather than something to trust.
+var uiExtensions = map[string]bool{
+	".css": true, ".scss": true, ".sass": true, ".less": true,
+	".html": true, ".htm": true, ".gohtml": true, ".tmpl": true, ".hbs": true, ".ejs": true,
+	".jsx": true, ".tsx": true, ".vue": true, ".svelte": true, ".astro": true,
+}
+
+// uiTouched reports whether the work so far changed anything that renders, and names
+// a couple of examples for the message.
+func (s *Service) uiTouched(ctx context.Context, env *tools.Env) (bool, string, error) {
+	args, err := json.Marshal(map[string]any{"stat": true})
+	if err != nil {
+		return false, "", err
+	}
+	// git_diff --stat with no explicit range, so it defaults to env.BaseCommit — the
+	// commit the plan was approved at — and falls back to uncommitted work when there
+	// is no plan. It already resolves all of that, and it is already logged.
+	res, err := s.reviewer.Execute(ctx, "git_diff", args, env)
+	if err != nil {
+		return false, "", err
+	}
+	if res.IsError {
+		return false, "", fmt.Errorf("git diff --stat: %s", res.Content)
+	}
+
+	var hits []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(res.Content, "\n") {
+		// A --stat line is "path | 3 +--". Anything without the separator is the
+		// summary line or a truncation notice.
+		path, _, found := strings.Cut(line, "|")
+		if !found {
+			continue
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if i := strings.LastIndexByte(path, '.'); i >= 0 {
+			if uiExtensions[strings.ToLower(path[i:])] && !seen[path] {
+				seen[path] = true
+				hits = append(hits, path)
+			}
+		}
+	}
+	if len(hits) == 0 {
+		return false, "", nil
+	}
+	names := hits
+	if len(names) > 3 {
+		names = append(names[:3:3], fmt.Sprintf("and %d more", len(hits)-3))
+	}
+	return true, strings.Join(names, ", "), nil
 }
 
 // streamWithRetry retries only calls that produce no model output. Once text or a
