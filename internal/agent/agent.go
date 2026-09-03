@@ -32,11 +32,15 @@ import (
 	"github.com/dootdotrun/doot-ai/internal/tools"
 )
 
+// A single model call is bounded by internal/model, which applies its own timeout
+// to every request. There used to be a 30-minute one here as well, wrapped around
+// the 10-minute one underneath: the inner deadline always won, so the outer number
+// described a limit that had never once been reached. The cancel this needs is for
+// Pause, not for a deadline.
 const (
-	deltaFlush   = 100 * time.Millisecond
-	maxAttempts  = 4
-	maxBackoff   = 12 * time.Second
-	modelTimeout = 30 * time.Minute
+	deltaFlush  = 100 * time.Millisecond
+	maxAttempts = 4
+	maxBackoff  = 12 * time.Second
 )
 
 // Agent states published to the live UI.
@@ -295,7 +299,7 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 
 	s.setState(ctx, r.ProjectID, r.ID, StateThinking, fmt.Sprintf("step %d", r.StepCount+1))
 	batch := newDeltaBatch(s.hub, deltaFlush)
-	streamCtx, cancel := context.WithTimeout(ctx, modelTimeout)
+	streamCtx, cancel := context.WithCancel(ctx)
 	w.setStream(cancel)
 	resp, streamErr := s.streamWithRetry(streamCtx, req, model.Handler{
 		OnText:     batch.add,
@@ -326,8 +330,8 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		}
 		return false, fmt.Errorf("model stream failed: %w", streamErr)
 	}
-	if resp.Starved() {
-		return false, fmt.Errorf("model exhausted its output budget on reasoning and returned nothing; raise Max output tokens from %d in Settings", cfg.Int("model.max_output_tokens"))
+	if cause := resp.SilentCause(); cause != model.NotSilent {
+		return false, silentModelError(cause, resp, cfg.Int("model.max_output_tokens"))
 	}
 
 	var encoded json.RawMessage
@@ -687,6 +691,28 @@ func (s *Service) pauseRun(runID string) error {
 	s.publishRun(context.Background(), r)
 	s.setState(context.Background(), r.ProjectID, r.ID, StateIdle, "paused")
 	return nil
+}
+
+// silentModelError explains a response that carried nothing to act on.
+//
+// One sentence per cause, and only the two budget causes mention the budget. The
+// version this replaced said "exhausted its output budget on reasoning" for every
+// empty response including the ones that never got as far as reasoning, and then
+// told the operator to raise a limit — which, past the API ceiling, is how a
+// recoverable blip became a permanent 400 on every subsequent request.
+func silentModelError(cause model.SilentCause, resp *model.Response, budget int) error {
+	switch cause {
+	case model.SilentTruncated:
+		return fmt.Errorf("the model reached its output limit of %d tokens without producing anything to act on. "+
+			"Raise Max output tokens in Settings, up to %d", budget, model.MaxOutputTokens)
+	case model.SilentReasoning:
+		return fmt.Errorf("the model spent %d output tokens reasoning and returned no text and no tool calls. "+
+			"Raise Max output tokens in Settings, up to %d", resp.Usage.CompletionTokens, model.MaxOutputTokens)
+	default:
+		return fmt.Errorf("the model returned no text, no tool calls, and no token usage, and gave no reason. " +
+			"That is a dropped or rejected request rather than a budget problem: check the model name and " +
+			"credentials in Settings, then press Resume")
+	}
 }
 
 // awaitError parks the run for the operator with an actionable next step.

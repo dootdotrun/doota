@@ -13,7 +13,22 @@ import (
 )
 
 // reviewerMaxTurns bounds the reviewer's read-only exploration.
-const reviewerMaxTurns = 5
+//
+// This counts model calls, not tool calls, and it used to be 5. A reviewer that is
+// explicitly invited to read files and search — as the prompt below does — spends
+// one turn orienting and one per read, so five meant it was cut off after three or
+// four files. "Ran out of turns without reaching a conclusion" was therefore the
+// ordinary outcome of a review rather than an exceptional one, and because the
+// pre-ship check in ship() only asks whether a review was attempted, the work
+// shipped anyway with nobody having looked at it.
+const reviewerMaxTurns = 24
+
+// reviewerWarnTurns is when the reviewer starts being told to wrap up.
+//
+// It cannot manage a budget it is not shown. The old loop counted privately, so the
+// reviewer had no way to distinguish its first turn from its last and no reason to
+// prioritise.
+const reviewerWarnTurns = 3
 
 const reviewerSystem = `You are an independent code reviewer with read-only tools. You did not write this code.
 
@@ -26,6 +41,11 @@ wrong and why it matters. Do not report style preferences, do not suggest refact
 do not restate what the code does.
 
 If the change is sound, say exactly: CLEAN
+
+You have a limited number of turns and you will be told when they are running low.
+Spend them on the parts of the diff where being wrong would matter most, and always
+finish with a verdict — a review that never concludes is worth nothing to the agent
+waiting on it. If you ran out of room before checking something, name it.
 
 Be brief. You are being read by another agent that has to act on this.`
 
@@ -82,11 +102,30 @@ func (s *Service) runReview(ctx context.Context, p *store.Project, cfg store.App
 
 	history := []model.Message{{Role: model.RoleUser, Content: b.String()}}
 	for turn := 0; turn < reviewerMaxTurns; turn++ {
-		callCtx, cancel := context.WithTimeout(ctx, modelTimeout)
+		remaining := reviewerMaxTurns - turn
+
+		// On the final turn the tools are withheld, which is what actually guarantees
+		// a verdict. Warning alone was not enough: offered a tool on its last turn, the
+		// reviewer would use it, and the loop then exited on a request nobody was going
+		// to answer. History always ends here on either the opening brief or a set of
+		// tool results, so appending a user turn is valid at this point.
+		specs := toolSpecs(s.reviewer)
+		switch {
+		case remaining == 1:
+			specs = nil
+			history = append(history, model.Message{Role: model.RoleUser,
+				Content: "Last turn, and your tools are withdrawn. Give your findings now, or CLEAN if the " +
+					"change is sound. Name anything you did not get to check."})
+		case remaining <= reviewerWarnTurns:
+			history = append(history, model.Message{Role: model.RoleUser,
+				Content: fmt.Sprintf("%d turns left. Finish what you are checking and reach a verdict.", remaining)})
+		}
+
+		callCtx, cancel := context.WithCancel(ctx)
 		resp, callErr := s.streamWithRetry(callCtx, model.Request{
 			APIKey: cfg.Secret(store.KeyModelAPIKey), BaseURL: cfg.Text(store.KeyModelBaseURL),
 			Model: cfg.Text(store.KeyModelName), System: reviewerSystem, Messages: history,
-			Tools: toolSpecs(s.reviewer), MaxTokens: cfg.Int("model.max_output_tokens"),
+			Tools: specs, MaxTokens: cfg.Int("model.max_output_tokens"),
 		}, model.Handler{})
 		cancel()
 
@@ -97,9 +136,10 @@ func (s *Service) runReview(ctx context.Context, p *store.Project, cfg store.App
 			return tools.Result{Content: "The review did not complete: " + callErr.Error() +
 				"\n\nDecide whether to retry it or proceed and say which.", IsError: true}
 		}
-		if resp.Starved() {
-			return tools.Result{Content: "The reviewer used its whole output budget without answering. " +
-				"Raise Max output tokens in Settings, or proceed and say you did.", IsError: true}
+		if cause := resp.SilentCause(); cause != model.NotSilent {
+			return tools.Result{Content: "The review did not complete: " +
+				silentModelError(cause, resp, cfg.Int("model.max_output_tokens")).Error() +
+				"\n\nDecide whether to retry it or proceed and say which.", IsError: true}
 		}
 
 		history = append(history, model.Message{Role: model.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
@@ -116,8 +156,11 @@ func (s *Service) runReview(ctx context.Context, p *store.Project, cfg store.App
 			history = append(history, model.Message{Role: model.RoleTool, Content: res.Content, ToolCallID: call.ID})
 		}
 	}
-	return tools.Result{Content: "The reviewer ran out of turns without reaching a conclusion. " +
-		"Proceed if you are confident, and say that the review was inconclusive.", IsError: true}
+	// Unreachable in normal operation: the final turn is made without tools, so it
+	// cannot end in another tool call. Kept as a real answer rather than a panic in
+	// case a future change to the loop above reintroduces the gap.
+	return tools.Result{Content: "The reviewer stopped without reaching a conclusion. " +
+		"Treat the review as inconclusive: proceed only if you are confident, and say so.", IsError: true}
 }
 
 // reviewResult turns the reviewer's prose into a tool result.

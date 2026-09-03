@@ -129,7 +129,51 @@ func (d chatData) CanSend() bool {
 	return d.Project != nil && (d.Run == nil || (d.Run.State == store.RunAwaitingHuman && d.Run.Awaiting() == store.AwaitingQuestion))
 }
 
+// handleChatControls returns just the run-state controls.
+//
+// The live view asks for this when a run crosses a state boundary. It replaced a
+// window.location.reload(), which refreshed the same controls correctly but also
+// destroyed the event stream, forced a reconnect and replay, reset the scroll
+// position, and discarded whatever the operator had typed.
+func (s *Server) handleChatControls(w http.ResponseWriter, r *http.Request) {
+	s.renderFragment(w, "controls", s.chatView(r))
+}
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	d := s.chatView(r)
+
+	// "idle" is reserved for a project that has genuinely not done anything. A run
+	// that ended says so, because the two used to be the same word.
+	status := "idle"
+	switch {
+	case d.Busy():
+		status = "working"
+	case d.Run != nil:
+		status = d.Run.State
+	case d.LastRun != nil && d.LastRun.State == store.RunDone:
+		status = "shipped"
+	case d.LastRun != nil:
+		status = "finished"
+	}
+
+	s.render(w, r, "chat", page{
+		Title:      "Chat",
+		Active:     "chat",
+		Status:     status,
+		User:       userFrom(r),
+		Notice:     r.URL.Query().Get("notice"),
+		Error:      r.URL.Query().Get("error"),
+		Data:       d,
+		HasProject: d.Project != nil,
+		Preview:    previewAvailable(d.Project),
+	})
+}
+
+// chatView assembles the Chat screen's data.
+//
+// Shared by the full page and the controls fragment so the two cannot disagree
+// about what state the run is in.
+func (s *Server) chatView(r *http.Request) chatData {
 	d := chatData{}
 
 	cfg, err := s.store.LoadConfig(r.Context())
@@ -187,31 +231,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// "idle" is reserved for a project that has genuinely not done anything. A run
-	// that ended says so, because the two used to be the same word.
-	status := "idle"
-	switch {
-	case d.Busy():
-		status = "working"
-	case d.Run != nil:
-		status = d.Run.State
-	case d.LastRun != nil && d.LastRun.State == store.RunDone:
-		status = "shipped"
-	case d.LastRun != nil:
-		status = "finished"
-	}
-
-	s.render(w, r, "chat", page{
-		Title:      "Chat",
-		Active:     "chat",
-		Status:     status,
-		User:       userFrom(r),
-		Notice:     r.URL.Query().Get("notice"),
-		Error:      r.URL.Query().Get("error"),
-		Data:       d,
-		HasProject: d.Project != nil,
-		Preview:    previewAvailable(d.Project),
-	})
+	return d
 }
 
 // handleChatSend accepts a message and starts a turn.

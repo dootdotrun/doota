@@ -1,0 +1,119 @@
+{{/*
+  Everything on the Chat screen that depends on run state: the agent bar, the
+  awaiting-attention card, the sandbox banner, and the task board.
+
+  It is a fragment so a state change can swap it. It used to be inline in
+  chat.html, and the only way to refresh it was window.location.reload() — which
+  tore down the EventSource, triggered a reconnect and a replay, threw away the
+  scroll position, and wiped anything half-typed in the composer. A run crossing
+  three state boundaries did that three times.
+
+  The composer is deliberately NOT in here. It holds the operator's draft, so it
+  must survive every swap; only its enabled state comes from this fragment, via
+  data-can-send on the wrapper.
+*/}}
+{{define "controls.html"}}
+<div id="controls" data-can-send="{{if .CanSend}}1{{else}}0{{end}}">
+
+  {{if .Run}}
+  <div id="agent-bar" class="agent-bar{{if eq .Run.State "idle"}} is-quiet{{end}}">
+    {{if eq .Run.State "running"}}<span class="spinner" aria-hidden="true"></span>{{end}}
+    <span id="agent-state">{{.Run.State}} · step {{.Run.StepCount}}{{if .Run.AwaitingReason.Valid}} · {{.Run.AwaitingReason.String}}{{end}}</span>
+    {{if eq .Run.State "running"}}
+      <form method="post" action="{{app "/chat/pause"}}" class="agent-bar-stop">
+        <button type="submit" class="btn btn-small btn-danger">{{if .Run.PauseRequested}}Force stop{{else}}Pause{{end}}</button>
+      </form>
+    {{else if eq .Run.State "paused"}}
+      <form method="post" action="{{app "/chat/resume"}}" class="agent-bar-stop">
+        <button type="submit" class="btn btn-small">Resume</button>
+      </form>
+    {{else if and (eq .Run.State "awaiting_human") (ne .Run.AwaitingReason.String "question") (ne .Run.AwaitingReason.String "plan_approval")}}
+      <form method="post" action="{{app "/chat/resume"}}" class="agent-bar-stop">
+        <button type="submit" class="btn btn-small">Resume</button>
+      </form>
+    {{end}}
+  </div>
+
+  {{if and (eq .Run.State "awaiting_human") .AwaitingError}}
+  <section class="card awaiting-card awaiting-{{.Run.AwaitingReason.String}}">
+    <h2>Needs you</h2>
+    <p>{{.AwaitingError}}</p>
+    {{if .AwaitingDetail}}<p class="help">{{.AwaitingDetail}}</p>{{end}}
+  </section>
+  {{end}}
+
+  {{else if .LastRun}}
+  {{/*
+    Nothing running and the last run ended. Shown rather than hidden: a bar that
+    vanishes is how a finished task used to be reported, which is
+    indistinguishable from one that never started.
+
+    Only a run that reached `done` gets the tick. `idle` is also where a run lands
+    when the model simply stopped talking mid-task, so styling both as a success
+    would replace one misleading signal with another.
+  */}}
+  {{if eq .LastRun.State "done"}}
+  <div id="agent-bar" class="agent-bar agent-bar-done">
+    <span class="agent-tick" aria-hidden="true">✓</span>
+    <span id="agent-state">shipped · {{.LastRun.StepCount}} steps</span>
+  </div>
+  {{else}}
+  <div id="agent-bar" class="agent-bar agent-bar-ended">
+    <span id="agent-state">stopped · {{.LastRun.StepCount}} steps</span>
+  </div>
+  {{end}}
+
+  {{else}}
+  {{/* Never run. The bar still occupies its box so nothing below it moves when a
+       run starts — see .agent-bar.is-quiet in app.css. */}}
+  <div id="agent-bar" class="agent-bar is-quiet"><span id="agent-state">idle</span></div>
+  {{end}}
+
+  {{if .Blocked}}<p class="banner banner-warn">{{.Blocked}}</p>{{end}}
+
+  {{with .Plan}}
+  <section id="plan" class="card plan-strip">
+    <div class="row">
+      <span class="plan-strip-title">{{.Title}}</span>
+      <span class="plan-progress">{{.Done}}/{{.Total}}</span>
+    </div>
+    {{if .Current}}<p class="plan-current"><strong>{{.Current.N}}.</strong> {{.Current.Summary}}</p>{{end}}
+
+    <details class="disclose">
+      <summary>All {{.Total}} tasks{{if .BaseCommit}} · from {{shortID .BaseCommit}}{{end}}</summary>
+      <ul class="task-board">
+        {{range .Tasks}}
+          <li class="task task-{{.Status}}{{if .Current}} task-current{{end}}">
+            <span class="task-n">{{.N}}</span>
+            <span class="task-summary">{{.Summary}}</span>
+            <span class="pill plan-status-{{.Status}}">{{.Status}}</span>
+            {{if .Note}}<p class="help task-note">{{.Note}}</p>{{end}}
+          </li>
+        {{end}}
+      </ul>
+      {{if .DiffURL}}<p class="help"><a href="{{.DiffURL}}">View the diff so far</a></p>{{end}}
+      {{if .Feedback}}<p class="help">Revision requested: {{.Feedback}}</p>{{end}}
+    </details>
+  </section>
+
+  {{if .CanApprove}}
+  <section class="card plan-actions stack">
+    <h2>Approve this plan?</h2>
+    <form method="post" action="{{app "/plan/approve"}}">
+      <button class="btn btn-primary" type="submit">Approve plan</button>
+    </form>
+    <details class="disclose">
+      <summary>Ask for a revision instead</summary>
+      <form method="post" action="{{app "/plan/revise"}}" class="stack">
+        <div class="field">
+          <textarea id="feedback" name="feedback" rows="3" placeholder="What should change?" required></textarea>
+        </div>
+        <button class="btn" type="submit">Request a revision</button>
+      </form>
+    </details>
+  </section>
+  {{end}}
+  {{end}}
+
+</div>
+{{end}}

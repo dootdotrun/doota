@@ -25,8 +25,8 @@
 // deltas therefore looks stalled for most of every call, which is why Handler has
 // an explicit OnStart and the chat screen shows a thinking state.
 //
-// **MaxTokens has to cover reasoning as well as output, and running out is
-// disguised.** The budget is spent on reasoning first, so too small a budget
+// **The output budget has to cover reasoning as well as output, and running out
+// is disguised.** The budget is spent on reasoning first, so too small a budget
 // produces a successful call that said nothing. Worse, the two transports disagree
 // about how they say so:
 //
@@ -34,10 +34,14 @@
 //	streaming       finish_reason "stop",   no content,   NO usage chunk at all
 //
 // So in streaming mode — which is the only mode this package uses — a starved call
-// is indistinguishable from a normal one by finish_reason, and it reports zero
-// tokens and therefore zero cost. Response.Starved reports that signature
-// explicitly, because the alternative is a loop that spends real money, records
-// $0, and tells the user the model had nothing to say.
+// can be indistinguishable from a normal one by finish_reason. Response.SilentCause
+// classifies what actually happened, because the alternative is a loop that spends
+// real money, records $0, and tells the operator the model had nothing to say.
+//
+// The budget travels as `max_completion_tokens`. `max_tokens` is the legacy field
+// and is documented as unsupported on reasoning models — sending it is a 400 with
+// an opaque "invalid parameters" body, which is close to undiagnosable from the
+// operator's side.
 package model
 
 import (
@@ -55,6 +59,14 @@ import (
 	"github.com/openai/openai-go/shared"
 	"github.com/openai/openai-go/shared/constant"
 )
+
+// MaxOutputTokens is the largest output budget the API will accept.
+//
+// Exceeding it is a 400 with a body that does not name the offending parameter, so
+// it is enforced here and mirrored by a bound on the Settings field. Both are
+// needed: the form stops an operator storing an impossible value, and this stops a
+// value that predates the bound from bricking every request.
+const MaxOutputTokens = 131072
 
 // Roles, mirroring the message table's check constraint.
 const (
@@ -160,14 +172,49 @@ func (r *Response) Silent() bool {
 	return strings.TrimSpace(r.Content) == "" && len(r.ToolCalls) == 0
 }
 
-// Starved reports the signature of an output budget consumed entirely by
-// reasoning: nothing came back, and the API declined to say what it cost.
+// SilentCause explains a response that came back with nothing to act on.
 //
-// Worth its own method because the remedy is specific and unguessable from the
-// symptom — raise model.max_output_tokens — and because every other silent
-// response means something different.
-func (r *Response) Starved() bool {
-	return r.Silent() && (r.Truncated || !r.UsageReported)
+// Three causes, deliberately kept apart. This replaced a single Starved() predicate
+// defined as "silent, and either truncated or missing usage", which collapsed every
+// empty stream — a dropped connection, a refusal, a rejected request — into one
+// report claiming the output budget had been consumed by reasoning.
+//
+// That mattered more than a wrong log line. The remedy printed alongside it was
+// "raise Max output tokens", so the one failure the operator could not actually fix
+// that way was the one they were told to fix that way, and raising the value past
+// the API's ceiling turns every later request into a 400. A cause that is not known
+// has to say so.
+type SilentCause string
+
+const (
+	// NotSilent means the response had content or tool calls.
+	NotSilent SilentCause = ""
+
+	// SilentTruncated is the API stating outright that the budget ran out.
+	SilentTruncated SilentCause = "truncated"
+
+	// SilentReasoning is tokens billed with nothing delivered: the budget was
+	// real, it was spent, and none of it reached us as content or a tool call.
+	SilentReasoning SilentCause = "reasoning"
+
+	// SilentUnknown is nothing back and no accounting for it. Usually a stream
+	// that died or a request that was refused — not a budget problem, and saying
+	// otherwise sends the operator to the wrong setting.
+	SilentUnknown SilentCause = "unknown"
+)
+
+// SilentCause classifies an empty response.
+func (r *Response) SilentCause() SilentCause {
+	switch {
+	case !r.Silent():
+		return NotSilent
+	case r.Truncated:
+		return SilentTruncated
+	case r.UsageReported && r.Usage.CompletionTokens > 0:
+		return SilentReasoning
+	default:
+		return SilentUnknown
+	}
 }
 
 // Handler receives progress while a call is in flight. Every field may be nil.
@@ -450,8 +497,17 @@ func (c *Client) params(req Request) (openai.ChatCompletionNewParams, error) {
 		Messages:      msgs,
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{IncludeUsage: param.NewOpt(true)},
 	}
+	// max_completion_tokens, never max_tokens. The latter is the legacy field, is
+	// documented as unsupported on reasoning models, and this endpoint rejects it
+	// with a bare "The request contains invalid parameters" — no mention of which
+	// parameter. Clamped as well as named, because the ceiling is likewise only
+	// discoverable as that same opaque 400.
 	if req.MaxTokens > 0 {
-		params.MaxTokens = param.NewOpt(int64(req.MaxTokens))
+		budget := req.MaxTokens
+		if budget > MaxOutputTokens {
+			budget = MaxOutputTokens
+		}
+		params.MaxCompletionTokens = param.NewOpt(int64(budget))
 	}
 
 	for _, t := range req.Tools {
