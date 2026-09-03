@@ -99,6 +99,47 @@
   {{if .CanApprove}}
   <section class="card plan-actions stack">
     <h2>Approve this plan?</h2>
+
+    {{/*
+      The spec, open rather than behind a disclosure. This is the one moment the
+      operator can catch a misunderstanding before it becomes a diff they cannot
+      read, so it is the one place in this UI where more text is the right call.
+    */}}
+    {{with .Spec}}
+    <div class="spec">
+      {{if .Problem}}<p class="spec-problem">{{.Problem}}</p>{{end}}
+      {{if .Approach}}<p>{{.Approach}}</p>{{end}}
+
+      {{if .Questions}}
+      <div class="spec-block spec-questions">
+        <h3>Needs a decision</h3>
+        <ul>{{range .Questions}}<li>{{.}}</li>{{end}}</ul>
+      </div>
+      {{end}}
+
+      {{if .Verification}}
+      <div class="spec-block">
+        <h3>Will be checked by</h3>
+        <ul>{{range .Verification}}<li>{{.}}</li>{{end}}</ul>
+      </div>
+      {{end}}
+
+      {{if .EdgeCases}}
+      <div class="spec-block">
+        <h3>Edge cases covered</h3>
+        <ul>{{range .EdgeCases}}<li>{{.}}</li>{{end}}</ul>
+      </div>
+      {{end}}
+
+      {{if .Risks}}
+      <div class="spec-block spec-risks">
+        <h3>Risks</h3>
+        <p>{{.Risks}}</p>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+
     <form method="post" action="{{app "/plan/approve"}}">
       <button class="btn btn-primary" type="submit">Approve plan</button>
     </form>

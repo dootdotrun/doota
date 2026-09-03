@@ -12,9 +12,9 @@ import (
 
 const minPasswordLen = 6
 
-// maxMemoriesLen matches the cap the remember tool enforces on the agent, so the
-// operator cannot save something the agent would have been refused.
-const maxMemoriesLen = 8000
+// maxNotesLen matches the cap the remember and record_orientation tools enforce on
+// the agent, so the operator cannot save something the agent would have been refused.
+const maxNotesLen = 8000
 
 // clearSuffix names the companion checkbox that empties a stored secret.
 const clearSuffix = "__clear"
@@ -81,6 +81,11 @@ type settingsData struct {
 	Memories    string
 	HasMemories bool
 
+	// Orientation is what the agent worked out about the repository. Editable for the
+	// same reason memories are: the agent writes it, it shapes every turn, and a
+	// stale build command silently misdirects every future conversation.
+	Orientation string
+
 	// Project is the section at the bottom of the screen, which used to be a tab
 	// of its own. Always populated — with a zero value carrying only the provider
 	// name when there is no project, so the template can render the create form.
@@ -137,6 +142,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			d.Memories = memories
 		} else if !errors.Is(memErr, store.ErrNotFound) {
 			s.log.Error("settings: load memories", "error", memErr)
+		}
+		if notes, notesErr := s.store.Orientation(r.Context(), pv.Project.ID); notesErr == nil {
+			d.Orientation = notes
+		} else if !errors.Is(notesErr, store.ErrNotFound) {
+			s.log.Error("settings: load orientation", "error", notesErr)
 		}
 	}
 
@@ -373,20 +383,41 @@ func (s *Server) handleSaveMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	memories := r.PostFormValue("memories")
-	if len(memories) > maxMemoriesLen {
-		s.redirectSettings(w, r, fmt.Sprintf("Memories must be under %d characters.", maxMemoriesLen))
+	// One handler for both durable notes, because the form posts whichever it owns
+	// and the validation and failure modes are identical.
+	if raw, present := r.PostForm["memories"]; present {
+		memories := raw[0]
+		if len(memories) > maxNotesLen {
+			s.redirectSettings(w, r, fmt.Sprintf("Memories must be under %d characters.", maxNotesLen))
+			return
+		}
+		if err := s.store.SetMemories(r.Context(), p.ID, memories); err != nil {
+			s.log.Error("save memories", "error", err)
+			s.redirectSettings(w, r, "Could not save memories.")
+			return
+		}
+		s.log.Info("memories edited by the operator", "chars", len(strings.TrimSpace(memories)))
+		s.redirectSettings(w, r, "Memories saved.")
 		return
 	}
 
-	if err := s.store.SetMemories(r.Context(), p.ID, memories); err != nil {
-		s.log.Error("save memories", "error", err)
-		s.redirectSettings(w, r, "Could not save memories.")
+	if raw, present := r.PostForm["orientation"]; present {
+		notes := raw[0]
+		if len(notes) > maxNotesLen {
+			s.redirectSettings(w, r, fmt.Sprintf("Orientation must be under %d characters.", maxNotesLen))
+			return
+		}
+		if err := s.store.SetOrientation(r.Context(), p.ID, notes); err != nil {
+			s.log.Error("save orientation", "error", err)
+			s.redirectSettings(w, r, "Could not save orientation.")
+			return
+		}
+		s.log.Info("orientation edited by the operator", "chars", len(strings.TrimSpace(notes)))
+		s.redirectSettings(w, r, "Orientation saved.")
 		return
 	}
 
-	s.log.Info("memories edited by the operator", "chars", len(strings.TrimSpace(memories)))
-	s.redirectSettings(w, r, "Memories saved.")
+	s.redirectSettings(w, r, "Nothing to save.")
 }
 
 func (s *Server) redirectSettings(w http.ResponseWriter, r *http.Request, notice string) {

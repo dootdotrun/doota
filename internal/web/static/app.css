@@ -382,6 +382,48 @@ input:focus, textarea:focus, select:focus {
   stroke-linejoin: round;
 }
 
+/* ---------- the spec, at approval time ----------
+
+   The one place in this UI where more text on screen is correct. Everywhere else
+   the operator already knows what the button does; here they are being asked to
+   approve work they will not be able to review afterwards, because they cannot read
+   the diff. So this renders open. */
+
+.spec {
+  border-left: 2px solid var(--border);
+  padding-left: 11px;
+  margin: 2px 0 4px;
+  font-size: 0.9rem;
+}
+
+.spec p { margin: 0 0 8px; }
+
+/* The restated problem is the highest-value line here: it is where the operator
+   finds out they were misunderstood. */
+.spec-problem { font-weight: 600; color: var(--text); }
+
+.spec-block { margin-top: 10px; }
+
+.spec-block h3 {
+  margin: 0 0 4px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.spec-block ul {
+  margin: 0;
+  padding-left: 17px;
+}
+
+.spec-block li { margin-bottom: 3px; }
+
+/* Open questions and risks are the two things worth interrupting for. */
+.spec-questions h3 { color: var(--accent); }
+.spec-risks h3 { color: var(--warn); }
+
 /* ---------- finished states ---------- */
 
 /* The agent bar, when a run has ended. Green rather than absent: see chat.html. */

@@ -96,10 +96,10 @@ func (gitDiffTool) Name() string { return "git_diff" }
 func (gitDiffTool) Spec() ToolSpec {
 	return ToolSpec{
 		Name: "git_diff",
-		Description: "Show changes as a diff. With no arguments, shows uncommitted work against HEAD " +
-			"during a phase, or the whole phase's work when reviewing one.",
+		Description: "Show changes as a diff. With no arguments, shows every change made since the plan was " +
+			"approved, or uncommitted work against HEAD when there is no plan.",
 		Params: object(map[string]Param{
-			"from": {Type: "string", Description: "Starting revision. Defaults to the current phase's start commit."},
+			"from": {Type: "string", Description: "Starting revision. Defaults to the commit the plan was approved at."},
 			"to":   {Type: "string", Description: "Ending revision. Defaults to HEAD."},
 			"stat": {Type: "boolean", Description: "Return a per-file summary instead of the full diff."},
 		}),
@@ -124,8 +124,8 @@ func (gitDiffTool) Execute(ctx context.Context, in json.RawMessage, env *Env) (R
 	from := strings.TrimSpace(args.From)
 	to := strings.TrimSpace(args.To)
 
-	// Defaulting from to the phase start commit is what lets the reviewer see
-	// exactly one phase's work without being told a SHA it has no way to know.
+	// Defaulting from to the plan's base commit is what lets the reviewer see exactly
+	// this plan's work without being told a SHA it has no way to know.
 	if from == "" && env.BaseCommit != "" {
 		from = env.BaseCommit
 	}
@@ -137,7 +137,7 @@ func (gitDiffTool) Execute(ctx context.Context, in json.RawMessage, env *Env) (R
 	var scope string
 	switch {
 	case from == "" && to == "":
-		// No phase and no arguments: uncommitted work is the useful answer.
+		// No plan and no arguments: uncommitted work is the useful answer.
 		cmd += " HEAD"
 		scope = "uncommitted changes against HEAD"
 	case from != "" && to == "":

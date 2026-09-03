@@ -99,6 +99,9 @@ func writeTools() []Tool {
 }
 
 // controlTools drive the loop itself rather than the sandbox.
+//
+// record_orientation is here rather than among the write tools because what it
+// changes is the agent's own durable context, not the sandbox.
 func controlTools() []Tool {
 	return []Tool{
 		createPlanTool{},
@@ -106,6 +109,7 @@ func controlTools() []Tool {
 		reviewTool{},
 		askHumanTool{},
 		rememberTool{},
+		orientTool{},
 		doneTool{},
 	}
 }

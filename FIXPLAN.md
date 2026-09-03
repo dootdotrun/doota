@@ -41,6 +41,7 @@ Severity: **S1** breaks the tool · **S2** degrades it badly · **S3** friction/
 | **F24** | S3 | Dead "phase" vocabulary in tool descriptions — subsystem was deleted, model still reads about it. | `tools/git.go` git_diff |
 | **F25** | S3 | `agent.modelTimeout` 30min is shadowed by `model.streamTimeout` 10min. Dead and misleading. | `agent/agent.go`, `model/model.go` |
 | **F26** | S3 | No context management and no token-usage readout. Only lever is destructive Clear. Part of why the window "feels" exhausted. | `store/messages.go` ContextMessages |
+| **F27** | S2 | **Plan progress counter never moved.** `loadPlan` counted tasks with status `"complete"`; the four real statuses are `pending`/`doing`/`done`/`blocked`. So every plan read `0/N` for its whole life. Found while reading the file for T2.1, not in the original audit. | `web/screens.go` loadPlan |
 
 ---
 
@@ -118,19 +119,40 @@ Deliberately **not** in Turn 1: F3 (needs a decision about whether `done` should
 hard-block on an inconclusive review — touches behaviour, belongs with the prompt
 work).
 
-## Turn 2 — behaviour. The "it feels generic" turn.
+## Turn 2 — behaviour. The "it feels generic" turn. ✅ DONE
 
-Transport work (T2.3–T2.5) is done. Prompt work (T2.1–T2.2, T2.6) is next.
-
-- [ ] **T2.1 — Prompt rework** (F20, F21, F22, F23)
-  - Orientation pass on fresh conversations: read README, manifests, discover test
-    and build commands, note conventions
-  - Plan-and-approve becomes the **default**, with a fast lane for genuine
-    questions
-  - Introduce a spec/doc format the agent must produce and follow
-  - Require edge cases and deeper verification; remove the brevity ceiling
-  - Somewhere to persist project facts across conversations
-- [ ] **T2.2 — Vocabulary cleanup** (F24) — remove dead "phase" language
+- [x] **T2.1 — Prompt rework** (F20, F21, F22, F23)
+  - **Orientation now exists.** New `record_orientation` tool + `project.orientation`
+    column (migration 003). The loop reads the README, manifests, test/lint config
+    and CI, works out the real build/test/run commands, *runs them to check*, and
+    records what it found. Injected into the prompt every call, so its absence is
+    itself the instruction to go and orient. Kept separate from `memories`: that is
+    what the operator said, this is what the agent worked out — different lifetimes,
+    different authorities
+  - **Plan-and-approve is the default.** `create_plan` is now the normal way to
+    start any change, not something to be asked for. Only exception is the operator
+    explicitly saying skip it. Questions are still answered as questions
+  - **A spec format that exists and is enforced at the tool boundary.**
+    `create_plan` requires problem, approach, and verification, and prompts hard for
+    edge cases, risks, and open questions. Rendered *open* on the approval card —
+    the one place in this UI where more text is correct, because it is the only
+    moment a non-programmer can catch a misunderstanding. Shown back to the model
+    every turn so "verify what you agreed" has something specific to check against
+  - **Brevity ceiling removed, deliberately not by deleting scope discipline.**
+    "Do the work that was asked and stop" stays — that is good engineering. What is
+    added is a requirement to report anything noticed-but-not-done as a
+    recommendation. Proactive suggestions without scope creep. And brevity is now
+    scoped to prose: "be brief in what you say and exhaustive in what you check"
+  - **The prompt now knows who it works for.** Non-technical operator, agent is the
+    last line of review, thoroughness costs nothing, never hand over a technical
+    decision without a plain-language trade-off and a recommendation, never claim
+    done without saying how you know
+- [x] **T2.2 — Vocabulary cleanup** (F24) — `git_diff`'s description and parameter
+      help no longer refer to "phases", a subsystem deleted before this audit. The
+      remaining mentions are Go comments recording why it was removed, which is
+      history worth keeping and is not model-facing
+- [x] **F27 — Plan progress counter fixed.** Compared against `"complete"`; the real
+      constant is `"done"`. Found while editing `loadPlan` for the spec view
 - [x] **T2.3 — Reasoning continuity** (F7, F5) — **done.** Full migration to the
       Responses API, stateless.
   - `internal/model` now speaks `/v1/responses`. `messages` → `input` items,
@@ -151,7 +173,16 @@ Transport work (T2.3–T2.5) is done. Prompt work (T2.1–T2.2, T2.6) is next.
       rejects). Blank = let the model decide. Applies to the agent and reviewer
 - [x] **T2.5 — Default to `muse-spark-1.3-contributor`** (F8); the 1.2-era
       measurements in `model.go` are rewritten around this transport
-- [ ] **T2.6 — Decide the `done` / review gate** (F3)
+- [x] **T2.6 — The `done` / review gate** (F3) — **decided: require a verdict, not
+      an attempt.** New `ReviewOutcomes` distinguishes a review that concluded from
+      one that merely happened. `done` refuses if no review was attempted, and
+      refuses again if one was attempted but never reached a verdict.
+
+      It deliberately cannot trap the run: after two attempts the agent is let
+      through on condition it states the review was inconclusive rather than
+      describing the work as reviewed. A reviewer broken in a way the operator
+      cannot repair from this UI should not be able to hold work hostage — but it
+      should not be able to launder it either.
 
 ## Turn 3 — the UI you want to look at.
 

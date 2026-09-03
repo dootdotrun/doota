@@ -98,9 +98,9 @@
 
 {{if .Data.HasMemories}}
 {{/*
-  The agent's durable memory, which goes into the system prompt on every call.
-  Editable because it is written by the agent itself: a drifted line would
-  otherwise shape every future turn with no way to see it, let alone correct it.
+  The agent's two durable notes. Both go into the system prompt on every call, and
+  both are written by the agent itself — so a drifted line would otherwise shape
+  every future turn with no way to see it, let alone correct it.
 */}}
 <details class="disclose group group-collapsed">
   <summary>Memories</summary>
@@ -110,6 +110,17 @@
                 placeholder="Empty. The agent writes here when you tell it something worth keeping.">{{.Data.Memories}}</textarea>
     </div>
     <button type="submit" class="btn">Save memories</button>
+  </form>
+</details>
+
+<details class="disclose group group-collapsed">
+  <summary>Orientation</summary>
+  <form class="stack" method="post" action="{{app "/settings/memories"}}">
+    <div class="field">
+      <textarea id="orientation" name="orientation" rows="14" spellcheck="false"
+                placeholder="Empty. The agent fills this in the first time it reads the project.">{{.Data.Orientation}}</textarea>
+    </div>
+    <button type="submit" class="btn">Save orientation</button>
   </form>
 </details>
 {{end}}

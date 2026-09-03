@@ -18,9 +18,13 @@ const (
 )
 
 // Plan statuses.
+//
+// Named PlanStatus* rather than Plan*, because PlanDraft is now the type holding a
+// proposed plan and having a constant and a type differ only by context is how you
+// get a compile error nobody can read.
 const (
-	PlanDraft    = "draft"
-	PlanApproved = "approved"
+	PlanStatusDraft    = "draft"
+	PlanStatusApproved = "approved"
 )
 
 // Task is one line of the board: a one-line summary and a status.
@@ -37,27 +41,84 @@ type Task struct {
 	Note    string `json:"note,omitempty"`
 }
 
+// Spec is the reasoning behind a plan, written before any of it is built.
+//
+// It exists because the operator is not a programmer and cannot review a list of
+// subtask titles for soundness. A restated problem, an approach in plain language,
+// and an explicit account of how each claim will be checked are reviewable by
+// someone who cannot read the diff — which is the only review that actually happens
+// here.
+//
+// It is a document, not a contract. Nothing in Postgres enforces that verification
+// was performed or that an edge case was handled, and that is deliberate: an earlier
+// design made every task carry a stored verification string and a matching commit,
+// gated completion on them, and produced six failure modes whose only effect was to
+// tell the agent its own work was illegal. Writing the spec down where the operator
+// can read it does the useful part of that without the machinery.
+type Spec struct {
+	// Problem is the goal restated in the agent's own words, which is how the
+	// operator finds out they were misunderstood before the work happens rather
+	// than after.
+	Problem string `json:"problem,omitempty"`
+
+	// Approach is how, in language a non-programmer can follow.
+	Approach string `json:"approach,omitempty"`
+
+	// Verification is how each claim will actually be checked. Named commands and
+	// observations, not "test it".
+	Verification []string `json:"verification,omitempty"`
+
+	// EdgeCases is what could break that the request did not mention. This is the
+	// thinking the operator is least able to do for themselves.
+	EdgeCases []string `json:"edge_cases,omitempty"`
+
+	// Risks is what might go wrong, and anything the agent is unsure of.
+	Risks string `json:"risks,omitempty"`
+
+	// Questions is anything genuinely ambiguous, surfaced at approval time rather
+	// than discovered halfway through. Not a blocker: the operator can approve
+	// anyway and the agent proceeds on its stated assumption.
+	Questions []string `json:"questions,omitempty"`
+}
+
+// Empty reports a spec with nothing in it.
+func (s Spec) Empty() bool {
+	return s.Problem == "" && s.Approach == "" && len(s.Verification) == 0 &&
+		len(s.EdgeCases) == 0 && s.Risks == "" && len(s.Questions) == 0
+}
+
 // Scratchpad is the whole working state of a plan, stored as one JSONB column.
 //
-// One column rather than goal and phase tables: it is read and written as a unit,
-// only ever by one runner, and it is small. A table per level bought referential
-// integrity for data that has exactly one owner.
+// One column rather than nested tables: it is read and written as a unit, only ever
+// by one runner, and it is small. A table per level bought referential integrity for
+// data that has exactly one owner.
 type Scratchpad struct {
 	Title      string `json:"title,omitempty"`
 	Status     string `json:"status,omitempty"`
 	BaseCommit string `json:"base_commit,omitempty"`
 	Feedback   string `json:"feedback,omitempty"`
+	Spec       Spec   `json:"spec,omitzero"`
 	Tasks      []Task `json:"tasks,omitempty"`
+}
+
+// PlanDraft is a proposed plan: the spec, the title, and the subtasks.
+//
+// A struct rather than more positional arguments to WritePlan, which was already
+// taking a title, a slice, and a message and would now take a spec as well.
+type PlanDraft struct {
+	Title string
+	Tasks []string
+	Spec  Spec
 }
 
 // Empty reports that there is no plan at all.
 func (s Scratchpad) Empty() bool { return s.Title == "" && len(s.Tasks) == 0 }
 
 // Approved reports that the operator released the plan for work.
-func (s Scratchpad) Approved() bool { return s.Status == PlanApproved }
+func (s Scratchpad) Approved() bool { return s.Status == PlanStatusApproved }
 
 // AwaitingApproval reports a drafted plan that has not been approved yet.
-func (s Scratchpad) AwaitingApproval() bool { return !s.Empty() && s.Status == PlanDraft }
+func (s Scratchpad) AwaitingApproval() bool { return !s.Empty() && s.Status == PlanStatusDraft }
 
 // Current returns the task being worked, or the first not-yet-done one.
 func (s Scratchpad) Current() *Task {
@@ -95,6 +156,32 @@ func (s Scratchpad) Render() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan: %s (%s)\n", s.Title, s.Status)
+
+	// The spec is shown back to the model on every turn alongside the tasks. It is
+	// what it committed to: the approach it said it would take and, more importantly,
+	// the verification it said it would perform. Keeping it in view is what makes
+	// "verify before you claim" checkable against something specific rather than a
+	// general instruction it can drift away from over twenty turns.
+	if !s.Spec.Empty() {
+		b.WriteString("\nAgreed spec:\n")
+		if s.Spec.Problem != "" {
+			fmt.Fprintf(&b, "  Problem: %s\n", s.Spec.Problem)
+		}
+		if s.Spec.Approach != "" {
+			fmt.Fprintf(&b, "  Approach: %s\n", s.Spec.Approach)
+		}
+		for _, v := range s.Spec.Verification {
+			fmt.Fprintf(&b, "  Must verify: %s\n", v)
+		}
+		for _, e := range s.Spec.EdgeCases {
+			fmt.Fprintf(&b, "  Edge case: %s\n", e)
+		}
+		if s.Spec.Risks != "" {
+			fmt.Fprintf(&b, "  Risks: %s\n", s.Spec.Risks)
+		}
+		b.WriteByte('\n')
+	}
+
 	for _, t := range s.Tasks {
 		fmt.Fprintf(&b, "%d. [%s] %s", t.N, t.Status, t.Summary)
 		if t.Note != "" {
@@ -157,16 +244,16 @@ func (s *Store) scratchpadTx(ctx context.Context, tx *sql.Tx, projectID string) 
 
 // WritePlan replaces the board with a fresh draft and parks the run for approval,
 // in one transaction so a restart never shows a plan without its approval gate.
-func (s *Store) WritePlan(ctx context.Context, projectID, runID, title string, summaries []string, tool NewMessage) (Scratchpad, *Run, *Message, error) {
-	title = strings.TrimSpace(title)
+func (s *Store) WritePlan(ctx context.Context, projectID, runID string, draft PlanDraft, tool NewMessage) (Scratchpad, *Run, *Message, error) {
+	title := strings.TrimSpace(draft.Title)
 	if title == "" {
 		return Scratchpad{}, nil, nil, errors.New("a plan needs a title")
 	}
-	if len(summaries) == 0 {
+	if len(draft.Tasks) == 0 {
 		return Scratchpad{}, nil, nil, errors.New("a plan needs at least one task")
 	}
-	pad := Scratchpad{Title: title, Status: PlanDraft}
-	for i, summary := range summaries {
+	pad := Scratchpad{Title: title, Status: PlanStatusDraft, Spec: draft.Spec}
+	for i, summary := range draft.Tasks {
 		summary = strings.TrimSpace(summary)
 		if summary == "" {
 			return Scratchpad{}, nil, nil, fmt.Errorf("task %d needs a summary", i+1)
@@ -225,7 +312,7 @@ func (s *Store) ApprovePlan(ctx context.Context, projectID, baseCommit string) (
 	if !pad.AwaitingApproval() {
 		return Scratchpad{}, nil, nil, errors.New("there is no drafted plan waiting for approval")
 	}
-	pad.Status = PlanApproved
+	pad.Status = PlanStatusApproved
 	pad.BaseCommit = strings.TrimSpace(baseCommit)
 	pad.Feedback = ""
 	if err := s.writeScratchpad(ctx, tx, projectID, pad); err != nil {
@@ -364,6 +451,37 @@ func (s *Store) Memories(ctx context.Context, projectID string) (string, error) 
 		return "", fmt.Errorf("read memories: %w", err)
 	}
 	return memories, nil
+}
+
+// Orientation is what the agent worked out about this repository for itself: how to
+// build it, how to test it, where things are, what the local idioms are.
+//
+// Separate from Memories, which holds what the operator said. Different lifetimes
+// and different authorities — see migration 003.
+func (s *Store) Orientation(ctx context.Context, projectID string) (string, error) {
+	var notes string
+	err := s.DB.QueryRowContext(ctx, `SELECT orientation FROM project WHERE id = $1`, projectID).Scan(&notes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("read orientation: %w", err)
+	}
+	return notes, nil
+}
+
+// SetOrientation replaces the orientation notes.
+//
+// Replace rather than append, like Memories: the agent is shown the current text and
+// returns the version it wants, so a fact that turned out to be wrong can be
+// corrected instead of accumulating next to its correction.
+func (s *Store) SetOrientation(ctx context.Context, projectID, notes string) error {
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE project SET orientation = $2, updated_at = now() WHERE id = $1`,
+		projectID, strings.TrimSpace(notes)); err != nil {
+		return fmt.Errorf("write orientation: %w", err)
+	}
+	return nil
 }
 
 // SetMemories replaces the memories column.

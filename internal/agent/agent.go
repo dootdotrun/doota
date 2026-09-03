@@ -493,7 +493,11 @@ func (s *Service) applyControl(ctx context.Context, p *store.Project, r *store.R
 		if !ok {
 			return nil, nil, fmt.Errorf("create_plan returned an invalid plan")
 		}
-		pad, awaiting, msg, err := s.store.WritePlan(ctx, p.ID, r.ID, request.Title, request.Tasks, in)
+		draft := store.PlanDraft{Title: request.Title, Tasks: request.Tasks, Spec: store.Spec{
+			Problem: request.Problem, Approach: request.Approach, Verification: request.Verification,
+			EdgeCases: request.EdgeCases, Risks: request.Risks, Questions: request.Questions,
+		}}
+		pad, awaiting, msg, err := s.store.WritePlan(ctx, p.ID, r.ID, draft, in)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -520,6 +524,17 @@ func (s *Service) applyControl(ctx context.Context, p *store.Project, r *store.R
 			return nil, nil, fmt.Errorf("remember returned an invalid update")
 		}
 		if err := s.store.SetMemories(ctx, p.ID, request.Memories); err != nil {
+			return nil, nil, err
+		}
+		msg, err := s.store.AppendMessage(ctx, in)
+		return msg, nil, err
+
+	case "record_orientation":
+		request, ok := result.Display.(tools.OrientationUpdate)
+		if !ok {
+			return nil, nil, fmt.Errorf("record_orientation returned an invalid update")
+		}
+		if err := s.store.SetOrientation(ctx, p.ID, request.Orientation); err != nil {
 			return nil, nil, err
 		}
 		msg, err := s.store.AppendMessage(ctx, in)
@@ -569,18 +584,36 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 		return msg, nil, appendErr
 	}
 
-	// One nudge if the work was never reviewed. Asking in the prompt was not
-	// enough: on a real run the model went straight from its last subtask to
-	// shipping. This checks that a review was attempted, not that it passed, so a
-	// failing reviewer cannot trap the run here.
-	reviewed, err := s.store.ReviewAttempted(ctx, r.ID)
+	// The work has to have been reviewed, and the review has to have reached a
+	// verdict.
+	//
+	// This used to check only that a review had been attempted, which was safe while
+	// attempting one implied getting one. It did not: the reviewer's budget was five
+	// model calls and running out was its ordinary outcome, so a run could ship with
+	// a review in the log and nobody having formed an opinion. The reviewer can
+	// finish now, so this can ask for what it actually wants.
+	//
+	// It still cannot trap the run. A reviewer that is genuinely broken — no diff, a
+	// dead stream — fails the same way every time, so after two attempts the agent is
+	// allowed through on the condition that it says the review was inconclusive.
+	// Blocking forever on a component the operator cannot repair from here would be
+	// worse than shipping with a stated caveat.
+	attempts, concluded, err := s.store.ReviewOutcomes(ctx, r.ID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !reviewed {
+	switch {
+	case attempts == 0:
 		msg, appendErr := s.store.AppendMessage(ctx, in(
 			"Before shipping, call review so an independent reviewer reads the diff. "+
 				"Deal with anything real it finds, then call done again.",
+			map[string]any{"summary": request.Summary}))
+		return msg, nil, appendErr
+	case !concluded && attempts < 2:
+		msg, appendErr := s.store.AppendMessage(ctx, in(
+			"The review did not reach a verdict, so nothing has actually been reviewed yet. "+
+				"Call review again. If it fails the same way a second time, say so in your summary "+
+				"and call done — but do not describe this work as reviewed.",
 			map[string]any{"summary": request.Summary}))
 		return msg, nil, appendErr
 	}
