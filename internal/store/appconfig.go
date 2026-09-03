@@ -38,6 +38,14 @@ type Field struct {
 	Help    string
 	Kind    FieldKind
 	Default any
+
+	// Max bounds a KindInt field. Zero means unbounded.
+	//
+	// Only the output budget uses it. It exists because that ceiling is otherwise
+	// discoverable only as an opaque 400 from the model API, and the error printed
+	// when the budget is exhausted tells the operator to raise the value — so
+	// without a bound, following the tool's own advice is how you break it.
+	Max int
 }
 
 // Secret reports whether the field holds a credential.
@@ -112,9 +120,17 @@ var ConfigFields = []Field{
 	},
 	{
 		Key: "model.max_output_tokens", Group: "Model", Label: "Max output tokens", Kind: KindInt,
-		Default: 16384,
-		Help: "Muse Spark is a reasoning model and spends this budget on reasoning first. " +
-			"Set it too low and calls return no content at all, having thought until the budget ran out.",
+		// 16384 was too low to be a safe default: this is a reasoning model that
+		// spends the budget on reasoning first, so a tight budget produces calls that
+		// think until it runs out and then return nothing. Headroom is close to free
+		// — billing is on tokens actually generated, not on the ceiling.
+		Default: 65536,
+		// Mirrors model.MaxOutputTokens. Duplicated rather than imported, for the same
+		// reason the role constants are: this layer describes a stored setting and
+		// that one describes a wire format.
+		Max: 131072,
+		Help: "Covers reasoning as well as visible output, and reasoning comes first. " +
+			"Maximum 131072.",
 	},
 	{
 		Key: "agent.system_prompt", Group: "Agent", Label: "System prompt", Kind: KindTextarea,
@@ -390,6 +406,9 @@ func ParseValue(f Field, raw string) (any, error) {
 		}
 		if n <= 0 {
 			return nil, fmt.Errorf("%s must be greater than zero", f.Label)
+		}
+		if f.Max > 0 && n > f.Max {
+			return nil, fmt.Errorf("%s cannot be more than %d", f.Label, f.Max)
 		}
 		return n, nil
 	case KindBool:

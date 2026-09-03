@@ -769,6 +769,19 @@ button[data-hold] { touch-action: manipulation; }
   color: var(--muted);
 }
 #agent-state { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* An idle bar stays in the layout and goes quiet, rather than being removed.
+
+   It used to get .hidden (display: none), so the bar appeared the moment a run
+   started and vanished when it ended — and because it sits above the transcript,
+   every one of those transitions shoved the entire conversation up or down by its
+   own height. During a run that crosses several state boundaries that is most of
+   the "shaking". Holding the box costs ~38px permanently and nothing moves. */
+.agent-bar.is-quiet {
+  opacity: 0.45;
+  border-style: dashed;
+}
+.agent-bar.is-quiet .agent-bar-stop { display: none; }
+
 .agent-bar-stop { margin-left: auto; flex-shrink: 0; }
 .agent-bar-stop .btn { min-height: 30px; padding: 3px 10px; font-size: 11.5px; }
 
@@ -791,6 +804,14 @@ button[data-hold] { touch-action: manipulation; }
 }
 
 .hidden { display: none !important; }
+
+/* The streamed-text placeholder while it holds nothing.
+
+   Collapsed rather than merely empty, because an empty bubble still paints its own
+   padding and border. Distinct from .hidden so it is clear this is a node that
+   stays mounted for the life of the page — see chat.js on why it is no longer
+   added and removed. */
+#streaming.is-empty { display: none; }
 
 /* ---------- composer ---------- */
 

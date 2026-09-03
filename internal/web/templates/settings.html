@@ -90,6 +90,24 @@
   <button type="submit" class="btn btn-primary">Save</button>
 </form>
 
+{{if .Data.HasMemories}}
+{{/*
+  The agent's durable memory, which goes into the system prompt on every call.
+  Editable because it is written by the agent itself: a drifted line would
+  otherwise shape every future turn with no way to see it, let alone correct it.
+*/}}
+<details class="disclose group group-collapsed">
+  <summary>Memories</summary>
+  <form class="stack" method="post" action="{{app "/settings/memories"}}">
+    <div class="field">
+      <textarea id="memories" name="memories" rows="10" spellcheck="false"
+                placeholder="Empty. The agent writes here when you tell it something worth keeping.">{{.Data.Memories}}</textarea>
+    </div>
+    <button type="submit" class="btn">Save memories</button>
+  </form>
+</details>
+{{end}}
+
 <form class="card stack" method="post" action="{{app "/settings/credentials"}}">
   <h2>Sign-in</h2>
 

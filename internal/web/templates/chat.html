@@ -8,123 +8,26 @@
 </p>
 {{end}}
 
-{{if .Data.Run}}
-<div id="agent-bar" class="agent-bar{{if eq .Data.Run.State "idle"}} hidden{{end}}">
-  {{if eq .Data.Run.State "running"}}<span class="spinner" aria-hidden="true"></span>{{end}}
-  <span id="agent-state">{{.Data.Run.State}} · step {{.Data.Run.StepCount}}{{if .Data.Run.AwaitingReason.Valid}} · {{.Data.Run.AwaitingReason.String}}{{end}}{{if .Data.AwaitingDetail}} · {{.Data.AwaitingDetail}}{{end}}</span>
-  {{if eq .Data.Run.State "running"}}
-    <form method="post" action="{{app "/chat/pause"}}" class="agent-bar-stop">
-      <button type="submit" class="btn btn-small btn-danger">{{if .Data.Run.PauseRequested}}Force stop{{else}}Pause{{end}}</button>
-    </form>
-  {{else if eq .Data.Run.State "paused"}}
-    <form method="post" action="{{app "/chat/resume"}}" class="agent-bar-stop">
-      <button type="submit" class="btn btn-small">Resume</button>
-    </form>
-  {{else if and (eq .Data.Run.State "awaiting_human") (ne .Data.Run.AwaitingReason.String "question") (ne .Data.Run.AwaitingReason.String "plan_approval")}}
-    <form method="post" action="{{app "/chat/resume"}}" class="agent-bar-stop">
-      <button type="submit" class="btn btn-small">Resume</button>
-    </form>
-  {{end}}
-</div>
-{{if and (eq .Data.Run.State "awaiting_human") .Data.AwaitingError}}
-<section class="card awaiting-card awaiting-{{.Data.Run.AwaitingReason.String}}">
-  <h2>Work needs attention</h2>
-  <p>{{.Data.AwaitingError}}</p>
-  {{if .Data.AwaitingDetail}}<p class="help">{{.Data.AwaitingDetail}}</p>{{end}}
-</section>
-{{end}}
-
-{{else if .Data.LastRun}}
 {{/*
-  Nothing is running and the last run ended. Shown rather than hidden: a bar that
-  vanishes is how a finished task used to be reported, which is indistinguishable
-  from one that never started.
-
-  Only a run that reached `done` gets the tick. `idle` is also where a run lands
-  when the model simply stopped talking mid-task, so styling both as a success
-  would replace one misleading signal with another.
+  Run-state controls, rendered from the same fragment the /chat/controls endpoint
+  returns. One implementation, so a live swap cannot drift from a page reload.
 */}}
-{{if eq .Data.LastRun.State "done"}}
-<div id="agent-bar" class="agent-bar agent-bar-done">
-  <span class="agent-tick" aria-hidden="true">✓</span>
-  <span id="agent-state">shipped · {{.Data.LastRun.StepCount}} steps</span>
-</div>
-{{else}}
-<div id="agent-bar" class="agent-bar agent-bar-ended">
-  <span id="agent-state">stopped · {{.Data.LastRun.StepCount}} steps</span>
-</div>
-{{end}}
+{{template "controls.html" .Data}}
 
-{{else}}
-<div id="agent-bar" class="agent-bar hidden"><span class="spinner" aria-hidden="true"></span><span id="agent-state">working</span></div>
-{{end}}
-
-{{if .Data.Blocked}}<p class="banner banner-warn">{{.Data.Blocked}}</p>{{end}}
-
-{{/*
-  The plan, on the same screen as the conversation it belongs to.
-
-  Collapsed to one line — title and progress — because most of the time it is
-  reference, not a decision. It opens to the full task list, and when the agent is
-  waiting for approval the two buttons that answer it are right here.
-*/}}
-{{with .Data.Plan}}
-<section id="plan" class="card plan-strip">
-  <div class="row">
-    <span class="plan-strip-title">{{.Title}}</span>
-    <span class="plan-progress">{{.Done}}/{{.Total}}</span>
-  </div>
-  {{if .Current}}<p class="plan-current"><strong>{{.Current.N}}.</strong> {{.Current.Summary}}</p>{{end}}
-
-  <details class="disclose">
-    <summary>All {{.Total}} tasks{{if .BaseCommit}} · from {{shortID .BaseCommit}}{{end}}</summary>
-    <ul class="task-board">
-      {{range .Tasks}}
-        <li class="task task-{{.Status}}{{if .Current}} task-current{{end}}">
-          <span class="task-n">{{.N}}</span>
-          <span class="task-summary">{{.Summary}}</span>
-          <span class="pill plan-status-{{.Status}}">{{.Status}}</span>
-          {{if .Note}}<p class="help task-note">{{.Note}}</p>{{end}}
-        </li>
-      {{end}}
-    </ul>
-    {{if .DiffURL}}<p class="help"><a href="{{.DiffURL}}">View the diff so far</a></p>{{end}}
-    {{if .Feedback}}<p class="help">Revision requested: {{.Feedback}}</p>{{end}}
-  </details>
-</section>
-
-{{if .CanApprove}}
-<section class="card plan-actions stack">
-  <h2>Approve this plan?</h2>
-  <p class="muted">Approval starts the work from the current commit. Nothing has been changed yet.</p>
-  <form method="post" action="{{app "/plan/approve"}}">
-    <button class="btn btn-primary" type="submit">Approve plan</button>
-  </form>
-  <details class="disclose">
-    <summary>Ask for a revision instead</summary>
-    <form method="post" action="{{app "/plan/revise"}}" class="stack">
-      <div class="field">
-        <textarea id="feedback" name="feedback" rows="3" placeholder="What should change?" required></textarea>
-      </div>
-      <button class="btn" type="submit">Request a revision</button>
-    </form>
-  </details>
-</section>
-{{end}}
-{{end}}
-
-<div id="transcript" class="transcript" data-last-message-id="{{.Data.LastMessageID}}" data-busy="{{if .Data.Busy}}1{{else}}0{{end}}">
+<div id="transcript" class="transcript" data-last-message-id="{{.Data.LastMessageID}}">
   {{if .Data.Messages}}
     {{template "messages.html" .Data.Messages}}
-  {{else}}
-    <div class="card">
-      <h2>Say something</h2>
-      <p class="muted">Ask about the code, or ask for a change. Work is persisted, so a deploy resumes it from the same point.</p>
-    </div>
   {{end}}
 </div>
 
-<div id="streaming" class="turn assistant hidden"><div class="bubble" id="streaming-text"></div></div>
+{{/*
+  The streamed-text placeholder. Always in the document: it used to be added and
+  removed as text arrived and as tool results landed, which meant a block several
+  lines tall appeared and vanished a few times a second and shoved the whole
+  transcript up and down. It is now cleared only when the assistant message it was
+  standing in for actually arrives.
+*/}}
+<div id="streaming" class="turn assistant is-empty"><div class="bubble" id="streaming-text"></div></div>
 
 <form id="composer" class="composer" method="post" action="{{app "/chat"}}">
   <textarea id="composer-input" name="message" rows="1"

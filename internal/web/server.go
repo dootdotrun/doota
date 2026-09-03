@@ -135,7 +135,7 @@ func parseTemplates() (pages, fragments map[string]*template.Template, err error
 		pages[name] = t
 	}
 
-	fragmentNames := []string{"project_status", "messages"}
+	fragmentNames := []string{"project_status", "messages", "controls"}
 	fragments = make(map[string]*template.Template, len(fragmentNames))
 	for _, name := range fragmentNames {
 		t, err := template.New(name).Funcs(templateFuncs).
@@ -205,6 +205,7 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/chat/pause", s.handleChatPause)
 			r.Post("/chat/resume", s.handleChatResume)
 			r.Get("/chat/tail", s.handleChatTail)
+			r.Get("/chat/controls", s.handleChatControls)
 
 			// The live stream.
 			r.Get("/events", s.handleEvents)
@@ -223,6 +224,7 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/settings/config", s.handleSaveConfig)
 			r.Post("/settings/config/reset", s.handleResetConfigField)
 			r.Post("/settings/credentials", s.handleSaveCredentials)
+			r.Post("/settings/memories", s.handleSaveMemories)
 
 			r.Get("/project/status", s.handleProjectStatus)
 			r.Post("/project", s.handleCreateProject)

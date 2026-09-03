@@ -12,6 +12,10 @@ import (
 
 const minPasswordLen = 6
 
+// maxMemoriesLen matches the cap the remember tool enforces on the agent, so the
+// operator cannot save something the agent would have been refused.
+const maxMemoriesLen = 8000
+
 // clearSuffix names the companion checkbox that empties a stored secret.
 const clearSuffix = "__clear"
 
@@ -60,6 +64,15 @@ type settingsData struct {
 	Missing                []string
 	Provider               string
 
+	// Memories is the agent's durable memory, editable here.
+	//
+	// It had no read path anywhere in the web layer at all: the agent rewrote it
+	// through the remember tool, it was injected into the system prompt on every
+	// call, and the operator could neither see it nor correct it. A drifted or
+	// wrong line therefore shaped every future turn invisibly and permanently.
+	Memories    string
+	HasMemories bool
+
 	// Project is the section at the bottom of the screen, which used to be a tab
 	// of its own. Always populated — with a zero value carrying only the provider
 	// name when there is no project, so the template can render the create form.
@@ -107,6 +120,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		p.Data = d
 		s.render(w, r, "settings", p)
 		return
+	}
+
+	// Only meaningful with a project, since memories are stored per project.
+	if pv.Project != nil {
+		d.HasMemories = true
+		if memories, memErr := s.store.Memories(r.Context(), pv.Project.ID); memErr == nil {
+			d.Memories = memories
+		} else if !errors.Is(memErr, store.ErrNotFound) {
+			s.log.Error("settings: load memories", "error", memErr)
+		}
 	}
 
 	d.Groups = buildGroups(cfg)
@@ -310,6 +333,39 @@ func (s *Server) handleSaveCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redirectSettings(w, r, "Username updated.")
+}
+
+// handleSaveMemories overwrites the agent's durable memory with the operator's
+// edit.
+//
+// Replace, not merge, which is the same contract the remember tool already has: the
+// agent is shown the whole text and returns the whole text. An empty submission is
+// a legitimate "forget all of this" rather than a mistake, so it is not rejected.
+func (s *Server) handleSaveMemories(w http.ResponseWriter, r *http.Request) {
+	p, err := s.projects.Active(r.Context())
+	if err != nil {
+		s.redirectSettings(w, r, "There is no project to store memories for.")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.redirectSettings(w, r, "Malformed form submission.")
+		return
+	}
+
+	memories := r.PostFormValue("memories")
+	if len(memories) > maxMemoriesLen {
+		s.redirectSettings(w, r, fmt.Sprintf("Memories must be under %d characters.", maxMemoriesLen))
+		return
+	}
+
+	if err := s.store.SetMemories(r.Context(), p.ID, memories); err != nil {
+		s.log.Error("save memories", "error", err)
+		s.redirectSettings(w, r, "Could not save memories.")
+		return
+	}
+
+	s.log.Info("memories edited by the operator", "chars", len(strings.TrimSpace(memories)))
+	s.redirectSettings(w, r, "Memories saved.")
 }
 
 func (s *Server) redirectSettings(w http.ResponseWriter, r *http.Request, notice string) {
