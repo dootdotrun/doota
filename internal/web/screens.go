@@ -26,6 +26,20 @@ type planView struct {
 	Current                   *taskView
 	Done, Total               int
 	CanApprove                bool
+
+	// Spec is what the operator is actually being asked to approve. A list of
+	// subtask titles is not reviewable by someone who cannot read the diff.
+	Spec *specView
+}
+
+// specView is the agreed spec, rendered for a non-programmer.
+type specView struct {
+	Problem      string
+	Approach     string
+	Verification []string
+	EdgeCases    []string
+	Risks        string
+	Questions    []string
 }
 
 // loadPlan builds the plan view, or nil when there is nothing planned.
@@ -46,11 +60,22 @@ func (s *Server) loadPlan(r *http.Request, p *store.Project, run *store.Run) *pl
 		Title: pad.Title, Status: pad.Status, BaseCommit: pad.BaseCommit,
 		Feedback: pad.Feedback, Total: len(pad.Tasks),
 	}
+	if !pad.Spec.Empty() {
+		v.Spec = &specView{
+			Problem: pad.Spec.Problem, Approach: pad.Spec.Approach,
+			Verification: pad.Spec.Verification, EdgeCases: pad.Spec.EdgeCases,
+			Risks: pad.Spec.Risks, Questions: pad.Spec.Questions,
+		}
+	}
+
 	current := pad.Current()
 	for _, t := range pad.Tasks {
 		task := taskView{N: t.N, Summary: t.Summary, Status: t.Status, Note: t.Note,
 			Current: current != nil && current.N == t.N}
-		if t.Status == "complete" {
+		// store.TaskDone, not "complete". This compared against a status string that
+		// does not exist in the four the board actually uses, so the progress counter
+		// beside every plan title read 0/N for the whole of every run.
+		if t.Status == store.TaskDone {
 			v.Done++
 		}
 		v.Tasks = append(v.Tasks, task)

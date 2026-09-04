@@ -338,12 +338,13 @@ func (s *Store) AppendAnswerAndResume(ctx context.Context, projectID, runID, con
 // appendMessageTx inserts a transcript row inside an existing transaction.
 func appendMessageTx(ctx context.Context, tx *sql.Tx, in NewMessage) (*Message, error) {
 	m, err := scanMessage(tx.QueryRowContext(ctx, `INSERT INTO message
-		(project_id, run_id, role, kind, content, reasoning, tool_calls, tool_call_id,
-		 tool_name, token_count, interrupted, tool_display)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING `+messageColumns,
+		(project_id, run_id, role, kind, content, reasoning_items, tool_calls, tool_call_id,
+		 tool_name, token_count, prompt_tokens, reasoning_tokens, interrupted, tool_display)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING `+messageColumns,
 		in.ProjectID, nullable(in.RunID), in.Role, nullable(in.Kind), in.Content,
-		nullable(in.Reasoning), nullableJSON(in.ToolCalls), nullable(in.ToolCallID),
-		nullable(in.ToolName), nullableInt(in.TokenCount), in.Interrupted, nullableJSON(in.ToolDisplay)))
+		nullableJSON(in.ReasoningItems), nullableJSON(in.ToolCalls), nullable(in.ToolCallID),
+		nullable(in.ToolName), nullableInt(in.TokenCount), nullableInt(in.PromptTokens),
+		nullableInt(in.ReasoningTokens), in.Interrupted, nullableJSON(in.ToolDisplay)))
 	if err != nil {
 		return nil, fmt.Errorf("append message in transaction: %w", err)
 	}

@@ -41,20 +41,49 @@ Severity: **S1** breaks the tool · **S2** degrades it badly · **S3** friction/
 | **F24** | S3 | Dead "phase" vocabulary in tool descriptions — subsystem was deleted, model still reads about it. | `tools/git.go` git_diff |
 | **F25** | S3 | `agent.modelTimeout` 30min is shadowed by `model.streamTimeout` 10min. Dead and misleading. | `agent/agent.go`, `model/model.go` |
 | **F26** | S3 | No context management and no token-usage readout. Only lever is destructive Clear. Part of why the window "feels" exhausted. | `store/messages.go` ContextMessages |
+| **F27** | S2 | **Plan progress counter never moved.** `loadPlan` counted tasks with status `"complete"`; the four real statuses are `pending`/`doing`/`done`/`blocked`. So every plan read `0/N` for its whole life. Found while reading the file for T2.1, not in the original audit. | `web/screens.go` loadPlan |
 
 ---
 
 ## Open decisions
 
-Blocking Turn 2 and Turn 4. Nothing in Turn 1 or 3 waits on these.
+- **D1 — Reasoning continuity scope (F7). ✅ DECIDED: full Responses API
+  migration.** No half-measure on the Chat Completions path.
 
-- **D1 — Reasoning continuity scope (F7).** Full Responses API migration, or
-  stateless reasoning replay on the existing Chat Completions path? The former is
-  the documented-recommended path and a larger change to `model/model.go`; the
-  latter is smaller and may be enough. Affects **T2.3**.
-- **D2 — Real UI verification.** Build headless-browser screenshots in the sandbox
-  feeding multimodal calls, or accept a markup/CSS-only UI subagent that is blind
-  to rendered pixels like the primary agent already is? Affects **T4.2**.
+  One sub-decision follows from it and was taken on architectural grounds rather
+  than asked: **stateless replay, not `previous_response_id`.** The Responses API
+  offers both. `previous_response_id` keeps conversation state on Meta's servers,
+  which would break the property the whole of this codebase is built on — that
+  everything durable lives in Postgres and a restart resumes from the last
+  boundary. It would also break Clear Conversation, which works by flipping
+  `in_context`, and would tie the transcript to opaque remote ids that can expire
+  under a run. So: `store: false`, `include: ["reasoning.encrypted_content"]`, and
+  reasoning items replayed out of Postgres. The `message.reasoning` column that
+  has existed and gone unused since the first migration is finally what carries it.
+
+- **D2 — Real UI verification. ✅ DECIDED: headless browser and real screenshots.**
+  A subagent reading markup and CSS is not worth building; the whole point is to
+  catch what only shows up once rendered.
+
+  Design notes that follow from it:
+
+  - **Chromium runs in the sandbox, not here.** The dev server the agent starts is
+    on `localhost:<port>` inside the sandbox, so that is where the browser has to
+    be. It also keeps the app's own machine free of a browser install.
+  - **Screenshots come back through `Sandbox.ReadFile`**, not base64 through
+    stdout. `bash` output is capped at 30KB and a screenshot is an order of
+    magnitude larger; `ReadFile` already exists and has no such cap.
+  - **Only the subagent sees the images.** A tool result on the Responses API is a
+    string, so the primary agent cannot be handed a picture — it gets the
+    reviewer's written findings. That is the division asked for anyway: the primary
+    agent starts the server and says where it is, the subagent looks.
+  - **Viewport captures, not full-page.** Full-page needs CDP; `--screenshot`
+    captures the viewport. Phone and desktop viewports are what "does this button
+    look right" actually depends on, and the tool says plainly that it is
+    viewport-only rather than pretending otherwise.
+  - **Self-healing install.** The setup script installs Chromium, but it only runs
+    at project creation, so existing sandboxes have none. The tool detects that and
+    says exactly how to fix it instead of failing opaquely.
 
 ---
 
@@ -109,40 +138,165 @@ Deliberately **not** in Turn 1: F3 (needs a decision about whether `done` should
 hard-block on an inconclusive review — touches behaviour, belongs with the prompt
 work).
 
-## Turn 2 — behaviour. The "it feels generic" turn.
+## Turn 2 — behaviour. The "it feels generic" turn. ✅ DONE
 
-- [ ] **T2.1 — Prompt rework** (F20, F21, F22, F23)
-  - Orientation pass on fresh conversations: read README, manifests, discover test
-    and build commands, note conventions
-  - Plan-and-approve becomes the **default**, with a fast lane for genuine
-    questions
-  - Introduce a spec/doc format the agent must produce and follow
-  - Require edge cases and deeper verification; remove the brevity ceiling
-  - Somewhere to persist project facts across conversations
-- [ ] **T2.2 — Vocabulary cleanup** (F24) — remove dead "phase" language
-- [ ] **T2.3 — Reasoning continuity** (F7) — **blocked on D1.** Biggest single
-      change to how the agent feels
-- [ ] **T2.4 — Expose `reasoning_effort`** (F9) — direct lever for carefulness
-- [ ] **T2.5 — Default to `muse-spark-1.3-contributor`** (F8), refresh the
-      1.2-era assumptions documented in `model.go`
-- [ ] **T2.6 — Decide the `done` / review gate** (F3)
+- [x] **T2.1 — Prompt rework** (F20, F21, F22, F23)
+  - **Orientation now exists.** New `record_orientation` tool + `project.orientation`
+    column (migration 003). The loop reads the README, manifests, test/lint config
+    and CI, works out the real build/test/run commands, *runs them to check*, and
+    records what it found. Injected into the prompt every call, so its absence is
+    itself the instruction to go and orient. Kept separate from `memories`: that is
+    what the operator said, this is what the agent worked out — different lifetimes,
+    different authorities
+  - **Plan-and-approve is the default.** `create_plan` is now the normal way to
+    start any change, not something to be asked for. Only exception is the operator
+    explicitly saying skip it. Questions are still answered as questions
+  - **A spec format that exists and is enforced at the tool boundary.**
+    `create_plan` requires problem, approach, and verification, and prompts hard for
+    edge cases, risks, and open questions. Rendered *open* on the approval card —
+    the one place in this UI where more text is correct, because it is the only
+    moment a non-programmer can catch a misunderstanding. Shown back to the model
+    every turn so "verify what you agreed" has something specific to check against
+  - **Brevity ceiling removed, deliberately not by deleting scope discipline.**
+    "Do the work that was asked and stop" stays — that is good engineering. What is
+    added is a requirement to report anything noticed-but-not-done as a
+    recommendation. Proactive suggestions without scope creep. And brevity is now
+    scoped to prose: "be brief in what you say and exhaustive in what you check"
+  - **The prompt now knows who it works for.** Non-technical operator, agent is the
+    last line of review, thoroughness costs nothing, never hand over a technical
+    decision without a plain-language trade-off and a recommendation, never claim
+    done without saying how you know
+- [x] **T2.2 — Vocabulary cleanup** (F24) — `git_diff`'s description and parameter
+      help no longer refer to "phases", a subsystem deleted before this audit. The
+      remaining mentions are Go comments recording why it was removed, which is
+      history worth keeping and is not model-facing
+- [x] **F27 — Plan progress counter fixed.** Compared against `"complete"`; the real
+      constant is `"done"`. Found while editing `loadPlan` for the spec view
+- [x] **T2.3 — Reasoning continuity** (F7, F5) — **done.** Full migration to the
+      Responses API, stateless.
+  - `internal/model` now speaks `/v1/responses`. `messages` → `input` items,
+    system prompt → `instructions`, budget → `max_output_tokens`
+  - `store: false` + `include: ["reasoning.encrypted_content"]`, so the reasoning
+    blobs come back to us instead of living on Meta's servers
+  - Migration `002`: the unused `message.reasoning` text column is dropped and
+    replaced by `reasoning_items jsonb`. Reasoning items are persisted with the
+    assistant turn that produced them and replayed verbatim on later requests
+  - Item ordering within an assistant turn is reasoning → text → tool calls, so
+    the thinking precedes the decision it produced
+  - The reviewer gets continuity too, which matters much more now it has 24 turns
+  - Bonus, and it fixes the rest of F4: truncation is no longer inferred. The API
+    reports `incomplete_details.reason`, so `truncated` and a new `filtered` are
+    both trustworthy, and usage now breaks out `reasoning_tokens` explicitly
+- [x] **T2.4 — Expose `reasoning_effort`** (F9) — new `KindChoice` field kind
+      (validated select, not free text, so it cannot store a value the API
+      rejects). Blank = let the model decide. Applies to the agent and reviewer
+- [x] **T2.5 — Default to `muse-spark-1.3-contributor`** (F8); the 1.2-era
+      measurements in `model.go` are rewritten around this transport
+- [x] **T2.6 — The `done` / review gate** (F3) — **decided: require a verdict, not
+      an attempt.** New `ReviewOutcomes` distinguishes a review that concluded from
+      one that merely happened. `done` refuses if no review was attempted, and
+      refuses again if one was attempted but never reached a verdict.
 
-## Turn 3 — the UI you want to look at.
+      It deliberately cannot trap the run: after two attempts the agent is let
+      through on condition it states the review was inconclusive rather than
+      describing the work as reviewed. A reviewer broken in a way the operator
+      cannot repair from this UI should not be able to hold work hostage — but it
+      should not be able to launder it either.
 
-- [ ] **T3.1 — Settings** (F16) — every group collapsed by default; wrap the four
-      trailing sections
-- [ ] **T3.2 — Strip teaching copy** (F17) — one-line delete confirm; help text
-      behind a disclosure or gone
-- [ ] **T3.3 — Real icon set** (F18) — inline SVG, no dependency
-- [ ] **T3.4 — PWA identity** (F19) — `id`/scope, splash, icon consistency
-- [ ] **T3.5 — Token usage readout** (F26) — stop guessing about the window
+## Turn 3 — the UI you want to look at. ✅ DONE
 
-## Turn 4 — the UI/UX subagent.
+- [x] **T3.1 — Settings** (F16) — everything closed on arrival. The old rule
+      ("collapsed only if every field is a textarea") could never close Credentials,
+      Model or Git; the four trailing sections — Sign-in, Session, and the whole
+      Project block — were not in the group loop at all and were always open. All of
+      it is `<details>` now, all closed.
 
-- [ ] **T4.1 — Subagent** — `agent.runReview` is the working template. Two roles:
-      design-schema advisor consulted *before* implementation, and UI guard
-      running *after* the semantic reviewer
-- [ ] **T4.2 — Real verification** — **blocked on D2**
+      One conditional exception, because a rule with no exception here would be
+      worse: a group holding an **unset required credential** opens, since the banner
+      at the top sends you there to fill it in. Same for the create-project form when
+      there is no project, and Sign-in while still on the default password. Nothing
+      else opens itself.
+- [x] **T3.2 — Teaching copy cut** (F17)
+  - Delete confirmation: two paragraphs → "Clear this conversation?" + two buttons
+  - Field help trimmed at the source, in `ConfigFields`, not hidden in the template
+    — "Covers reasoning as well as visible output, and reasoning comes first.
+    Maximum 131072." became "Includes reasoning. Max 131072." Two fields lost their
+    help entirely because the label already said it
+  - The repo-URL, preview, setup-script and sandbox-recovery paragraphs are one
+    short line each. `sandboxBlockedMessage` went from a sentence-and-a-clause per
+    status to a fragment
+- [x] **T3.3 — Real icon set** (F18) — new `fragments/icons.html`, defined once and
+      shared, so the enabled and disabled variants of each header button stop
+      carrying duplicate path data.
+
+      The settings glyph is now **sliders, not a gear**: a gear needs eight teeth to
+      read as a gear and eight teeth at 19px is mud. The old one was a circle with
+      six disconnected tick marks around it. Reload, clear and preview are redrawn
+      with geometry that survives 19px; send is unchanged in meaning.
+- [x] **T3.4 — PWA identity** (F19)
+  - `id` was `/` while `scope` and `start_url` were `/app/`. Now all `/app/`
+  - `background_color` was `#ffffff` on a white `theme_color`, so both platforms
+    generated a blank white splash. Background is now the accent blue
+  - **Icons regenerated** to match the app: accent blue, two white dots for the
+    "oo" in doot, antialiased by 4x supersampling in a throwaway Go generator (no
+    image library needed). Maskable variant is full-bleed with the mark inside the
+    safe zone
+  - *Correction to F19:* the maskable icon being RGB rather than RGBA is **not** a
+    defect. A maskable icon must be fully opaque, so PNG drops the alpha channel
+    correctly. The original finding overstated that one
+- [x] **T3.5 — Context readout** (F26) — migration 004 adds `prompt_tokens` and
+      `reasoning_tokens` to `message`; `token_count` only ever held completion
+      tokens, which answers what a reply cost and not how full the conversation is.
+      The footer now reads e.g. `muse-spark-1.3-contributor · 250k / 1048k · 23%`,
+      taken from the API's own accounting on the last call rather than estimated.
+
+## Turn 4 — the UI/UX subagent, with eyes. ✅ DONE
+
+Built bottom-up: capability first, then the agent that uses it, then the gate that
+makes it non-optional.
+
+- [x] **T4.1 — Image input in `internal/model`.** `Message.Images` carries raw bytes
+      (not pre-built data URLs, so one place knows the encoding) and becomes
+      `input_image` content parts at detail `high` — low detail is exactly what would
+      smooth away the misalignment and clipping worth catching. Refused before
+      sending if empty or over 5MB, since that returns as an opaque payload error
+- [x] **T4.2 — `screenshot` tool.** Headless Chromium **inside the sandbox**, because
+      the dev server it photographs is on `localhost:<port>` in there. Bytes come back
+      via `Sandbox.ReadFile`, not base64 through stdout — command output is capped at
+      30KB and every capture would have been silently truncated into a corrupt PNG.
+      `--no-sandbox` and `--disable-dev-shm-usage` because Chromium's own sandbox
+      needs privileges a container lacks and `/dev/shm` is usually tiny.
+      Labels are sanitised, because a label becomes a filename and `../` would write
+      outside the capture directory
+- [x] **T4.3 — The subagent** (`agent/uireview.go`), modelled on `runReview`: own
+      history, own registry, budget of 20, warning at 3, **tools withheld on the last
+      turn** so a verdict always arrives. Captures phone (390×844) and desktop
+      (1440×900). A screenshot it takes mid-review is attached as a following user
+      turn, because a tool result on this transport is text
+- [x] **T4.4 — `ui_review` control tool**, executed by the runner exactly like
+      `review`. Two modes: `design` before building (returns a brief with real units,
+      states, and responsive behaviour), `verify` after (returns defects or CLEAN)
+- [x] **T4.5 — The gate.** `done` requires a concluded `ui_review` when the diff
+      touches files that can *look* wrong without *being* wrong — templates,
+      stylesheets, component files. Deliberately not every front-end file: a lockfile
+      cannot move a button, and a guard that fires on everything is one to resent.
+      Non-trapping on the same terms as T2.6
+- [x] **T4.6 — Chromium in the setup script** (POSIX-safe, reported separately in the
+      provision log because a missing browser disables one feature rather than
+      breaking something general), plus a transcript card that distinguishes a design
+      brief from a verify verdict
+
+Two things found while building this, both fixed:
+
+- **`screenshot` validated its arguments after looking up the sandbox**, so a missing
+  label surfaced as "no sandbox available" — an infrastructure error, which strands
+  the whole run, for something the model could have corrected from a one-line result.
+  Arguments are checked first now.
+- **Migration 005 finds the old `kind` CHECK constraint in the catalog** rather than
+  dropping it by name. It was declared inline in `CREATE TABLE`, so Postgres named it;
+  a `DROP CONSTRAINT IF EXISTS` guessing wrong would have succeeded silently and left
+  the original still rejecting `ui_review`. The symptom would have been a run stranded
+  on its first UI review, a long way from the cause.
 
 ---
 

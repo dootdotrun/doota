@@ -1,0 +1,62 @@
+{{/*
+  The icon set.
+
+  Defined once and used by both the enabled and disabled variants of each header
+  button, which previously carried duplicate copies of the same path data.
+
+  These replace hand-written stubs. The CSS was never the problem — `.iconbtn svg`
+  correctly sets fill:none and stroke:currentColor — the geometry was. The settings
+  glyph in particular was a circle surrounded by six disconnected tick marks, which
+  at 19px with a 1.8px stroke reads as a smudge rather than as anything.
+
+  Rules for anything added here: a 24x24 viewBox, stroke-only (no fills), and
+  nothing that depends on detail finer than about 2px, because these render at 19px
+  on a phone. Stroke width, colour, linecap and linejoin all come from CSS.
+*/}}
+
+{{/*
+  Sliders rather than a gear. A gear at this size needs eight teeth to read as a
+  gear, and eight teeth at 19px is mud. Two tracks with knobs on them stays legible
+  and is just as widely understood as "settings".
+*/}}
+{{define "icon-settings"}}
+<svg viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M3 8.5h8"/><circle cx="14" cy="8.5" r="2.5"/><path d="M17 8.5h4"/>
+  <path d="M3 15.5h4"/><circle cx="10" cy="15.5" r="2.5"/><path d="M13 15.5h8"/>
+</svg>
+{{end}}
+
+{{/* An arc most of the way round, with the arrowhead as a corner at its head. */}}
+{{define "icon-reload"}}
+<svg viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M19.9 15.2A8.5 8.5 0 1 1 17.6 5.6L21 8.6"/>
+  <path d="M21 3.6v5h-5"/>
+</svg>
+{{end}}
+
+{{/* A lid, a tapered body, and two ribs — enough to read as a bin at 19px. */}}
+{{define "icon-clear"}}
+<svg viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M4 7h16"/>
+  <path d="M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6A1.2 1.2 0 0 1 14.5 5.2V7"/>
+  <path d="M6.2 7l.9 12.1A1.5 1.5 0 0 0 8.6 20.5h6.8a1.5 1.5 0 0 0 1.5-1.4L17.8 7"/>
+  <path d="M10.3 11v5.5M13.7 11v5.5"/>
+</svg>
+{{end}}
+
+{{/* Box with a corner lifted and an arrow leaving it: opens elsewhere. */}}
+{{define "icon-preview"}}
+<svg viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M18 13.5V19a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 19V8a1.5 1.5 0 0 1 1.5-1.5H11"/>
+  <path d="M14.5 4h5.5v5.5"/>
+  <path d="M20 4l-8 8"/>
+</svg>
+{{end}}
+
+{{/* Send. An upward arrow, which is what the composer's action is. */}}
+{{define "icon-send"}}
+<svg viewBox="0 0 24 24" aria-hidden="true">
+  <path d="M12 20V5"/>
+  <path d="M5.5 11.5L12 5l6.5 6.5"/>
+</svg>
+{{end}}

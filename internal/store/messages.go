@@ -27,6 +27,7 @@ const (
 const (
 	KindPlan     = "plan"
 	KindReview   = "review"
+	KindUIReview = "ui_review"
 	KindAskHuman = "ask_human"
 	KindNotice   = "notice"
 )
@@ -36,21 +37,28 @@ const (
 // The transcript is append-only. Clearing the conversation flips in_context and
 // stamps archived_at; it does not edit or delete.
 type Message struct {
-	ID          int64
-	ProjectID   string
-	RunID       sql.NullString
-	Role        string
-	Kind        sql.NullString
-	Content     string
-	Reasoning   sql.NullString
-	ToolCalls   json.RawMessage
-	ToolCallID  sql.NullString
-	ToolName    sql.NullString
-	TokenCount  sql.NullInt64
-	InContext   bool
-	ArchivedAt  sql.NullTime
-	Interrupted bool
-	CreatedAt   time.Time
+	ID        int64
+	ProjectID string
+	RunID     sql.NullString
+	Role      string
+	Kind      sql.NullString
+	Content   string
+	ToolCalls json.RawMessage
+
+	// ReasoningItems is the model's retained chain of thought for this turn, as it
+	// came off the wire. Replayed verbatim on later requests and never rendered:
+	// see internal/model on why dropping it is expensive.
+	ReasoningItems json.RawMessage
+
+	ToolCallID      sql.NullString
+	ToolName        sql.NullString
+	TokenCount      sql.NullInt64
+	PromptTokens    sql.NullInt64
+	ReasoningTokens sql.NullInt64
+	InContext       bool
+	ArchivedAt      sql.NullTime
+	Interrupted     bool
+	CreatedAt       time.Time
 
 	// ToolDisplay is the tool's richer payload for the UI — a structured diff, a
 	// findings list. Never sent to the model, which reads Content instead.
@@ -101,30 +109,33 @@ func (m *Message) HasToolCalls() bool {
 
 // NewMessage is the input to AppendMessage. Optional fields are zero-valued.
 type NewMessage struct {
-	ProjectID   string
-	RunID       string
-	Role        string
-	Kind        string
-	Content     string
-	Reasoning   string
-	ToolCalls   json.RawMessage
-	ToolCallID  string
-	ToolName    string
-	TokenCount  int
-	Interrupted bool
-	ToolDisplay json.RawMessage
+	ProjectID       string
+	RunID           string
+	Role            string
+	Kind            string
+	Content         string
+	ReasoningItems  json.RawMessage
+	ToolCalls       json.RawMessage
+	ToolCallID      string
+	ToolName        string
+	TokenCount      int
+	PromptTokens    int
+	ReasoningTokens int
+	Interrupted     bool
+	ToolDisplay     json.RawMessage
 }
 
-const messageColumns = `id, project_id, run_id, role, kind, content, reasoning,
-	tool_calls, tool_call_id, tool_name, token_count, in_context, archived_at,
-	interrupted, created_at, tool_display`
+const messageColumns = `id, project_id, run_id, role, kind, content, reasoning_items,
+	tool_calls, tool_call_id, tool_name, token_count, prompt_tokens,
+	reasoning_tokens, in_context, archived_at, interrupted, created_at, tool_display`
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var m Message
-	var toolCalls, toolDisplay []byte
+	var reasoning, toolCalls, toolDisplay []byte
 	err := row.Scan(&m.ID, &m.ProjectID, &m.RunID, &m.Role, &m.Kind,
-		&m.Content, &m.Reasoning, &toolCalls, &m.ToolCallID, &m.ToolName,
-		&m.TokenCount, &m.InContext, &m.ArchivedAt, &m.Interrupted, &m.CreatedAt,
+		&m.Content, &reasoning, &toolCalls, &m.ToolCallID, &m.ToolName,
+		&m.TokenCount, &m.PromptTokens, &m.ReasoningTokens,
+		&m.InContext, &m.ArchivedAt, &m.Interrupted, &m.CreatedAt,
 		&toolDisplay)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -134,7 +145,13 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	}
 	m.ToolCalls = json.RawMessage(toolCalls)
 	m.ToolDisplay = json.RawMessage(toolDisplay)
+	m.ReasoningItems = json.RawMessage(reasoning)
 	return &m, nil
+}
+
+// HasReasoning reports whether this turn carries reasoning to replay.
+func (m *Message) HasReasoning() bool {
+	return len(m.ReasoningItems) > 0 && string(m.ReasoningItems) != "null"
 }
 
 // AppendMessage adds a turn to the transcript.
@@ -148,14 +165,16 @@ func (s *Store) AppendMessage(ctx context.Context, in NewMessage) (*Message, err
 
 	m, err := scanMessage(s.DB.QueryRowContext(ctx, `
 		INSERT INTO message
-			(project_id, run_id, role, kind, content, reasoning,
-			 tool_calls, tool_call_id, tool_name, token_count, interrupted, tool_display)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			(project_id, run_id, role, kind, content, reasoning_items,
+			 tool_calls, tool_call_id, tool_name, token_count, prompt_tokens,
+			 reasoning_tokens, interrupted, tool_display)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING `+messageColumns,
 		in.ProjectID, nullable(in.RunID),
-		in.Role, nullable(in.Kind), in.Content, nullable(in.Reasoning),
+		in.Role, nullable(in.Kind), in.Content, nullableJSON(in.ReasoningItems),
 		nullableJSON(in.ToolCalls), nullable(in.ToolCallID), nullable(in.ToolName),
-		nullableInt(in.TokenCount), in.Interrupted, nullableJSON(in.ToolDisplay)))
+		nullableInt(in.TokenCount), nullableInt(in.PromptTokens),
+		nullableInt(in.ReasoningTokens), in.Interrupted, nullableJSON(in.ToolDisplay)))
 	if err != nil {
 		return nil, fmt.Errorf("append message: %w", err)
 	}
@@ -203,6 +222,31 @@ func (s *Store) MessagesAfter(ctx context.Context, projectID string, afterID int
 		`SELECT `+messageColumns+` FROM message
 		  WHERE project_id = $1 AND id > $2 AND in_context
 		  ORDER BY id`, projectID, afterID)
+}
+
+// ContextTokens returns the input token count of the most recent model call in the
+// live window, or 0 if nothing has been called yet.
+//
+// This is how full the context actually was on the last request, straight from the
+// API's own accounting rather than estimated from message lengths. Archived messages
+// are excluded for the same reason they are excluded from the transcript: after a
+// Clear the window really is empty, and a number that kept counting them would be
+// describing a conversation the model can no longer see.
+func (s *Store) ContextTokens(ctx context.Context, projectID string) (int, error) {
+	var tokens sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `SELECT prompt_tokens FROM message
+		WHERE project_id = $1 AND in_context AND prompt_tokens IS NOT NULL
+		ORDER BY id DESC LIMIT 1`, projectID).Scan(&tokens)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read context tokens: %w", err)
+	}
+	if !tokens.Valid {
+		return 0, nil
+	}
+	return int(tokens.Int64), nil
 }
 
 // LatestMessageID returns the newest message id for a project, or 0 for none.

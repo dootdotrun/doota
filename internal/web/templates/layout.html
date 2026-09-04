@@ -34,27 +34,21 @@
   <a class="statusbar-title" href="{{app "/"}}">doot</a>
   {{if .Status}}<span class="chip">{{.Status}}</span>{{end}}
 
+  {{/* Glyphs come from fragments/icons.html, so the enabled and disabled variants
+       below cannot drift apart. */}}
   <nav class="statusbar-actions" aria-label="Actions">
     <a class="iconbtn{{if eq .Active "settings"}} is-active{{end}}" href="{{app "/settings"}}"
-       title="Settings" aria-label="Settings">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M4.2 7.5l2.6 1.5m10.4 6-2.6-1.5M4.2 16.5l2.6-1.5m10.4-6-2.6 1.5"/></svg>
-    </a>
+       title="Settings" aria-label="Settings">{{template "icon-settings"}}</a>
 
     {{/* Reloads the document, which is also what re-establishes the event stream. */}}
     <button type="button" class="iconbtn" id="refresh-action"
-            title="Reload" aria-label="Reload">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 12a8.5 8.5 0 1 1-2.8-6.3"/><path d="M20.5 4.5V10h-5.5"/></svg>
-    </button>
+            title="Reload" aria-label="Reload">{{template "icon-reload"}}</button>
 
     {{if .HasProject}}
       <button type="button" class="iconbtn" id="clear-action"
-              title="Clear conversation" aria-label="Clear conversation">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l.9 12.1a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"/></svg>
-      </button>
+              title="Clear conversation" aria-label="Clear conversation">{{template "icon-clear"}}</button>
     {{else}}
-      <span class="iconbtn is-disabled" title="Nothing to clear yet" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l.9 12.1a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"/></svg>
-      </span>
+      <span class="iconbtn is-disabled" title="Nothing to clear yet" aria-hidden="true">{{template "icon-clear"}}</span>
     {{end}}
 
     {{/*
@@ -64,13 +58,9 @@
     */}}
     {{if .Preview}}
       <a class="iconbtn" href="/" target="_blank" rel="noopener"
-         title="Open live preview" aria-label="Open live preview">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14.5V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4.5"/></svg>
-      </a>
+         title="Open live preview" aria-label="Open live preview">{{template "icon-preview"}}</a>
     {{else}}
-      <span class="iconbtn is-disabled" title="Preview opens once the sandbox is ready" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14.5V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4.5"/></svg>
-      </span>
+      <span class="iconbtn is-disabled" title="Preview opens once the sandbox is ready" aria-hidden="true">{{template "icon-preview"}}</span>
     {{end}}
   </nav>
 </header>
@@ -89,18 +79,18 @@
 */}}
 <form id="clear-form" method="post" action="{{app "/project/clear-conversation"}}" hidden></form>
 
+{{/*
+  One line, no lecture. This used to be two paragraphs explaining what a hard
+  delete is and enumerating everything that survives it — read in full every time
+  the operator wanted to start a fresh conversation, which is several times a day
+  and is the single most routine action in the app.
+
+  The sandbox, the branch, the working tree and both durable notes all survive;
+  that is worth knowing once, not on every press.
+*/}}
 <div class="modal" id="clear-modal" hidden>
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="clear-modal-title">
-    <h2 id="clear-modal-title">Clear conversation?</h2>
-    <p class="muted">
-      Permanently deletes every message, run, tool call, and the task board. This
-      is not an archive and there is no undo.
-    </p>
-    <p class="muted">
-      The sandbox is <strong>not</strong> touched. The repo, the <code>doot</code>
-      branch, your working tree, anything still running, and remembered notes all
-      survive — so the next task starts in the same place, with an empty context.
-    </p>
+    <h2 id="clear-modal-title">Clear this conversation?</h2>
     <div class="btn-row">
       <button type="button" class="btn" data-modal-close>Cancel</button>
       <button type="submit" class="btn btn-danger" form="clear-form">Clear</button>

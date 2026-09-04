@@ -126,6 +126,7 @@ func (s *Service) runReview(ctx context.Context, p *store.Project, cfg store.App
 			APIKey: cfg.Secret(store.KeyModelAPIKey), BaseURL: cfg.Text(store.KeyModelBaseURL),
 			Model: cfg.Text(store.KeyModelName), System: reviewerSystem, Messages: history,
 			Tools: specs, MaxTokens: cfg.Int("model.max_output_tokens"),
+			ReasoningEffort: cfg.Text(store.KeyReasoningEffort),
 		}, model.Handler{})
 		cancel()
 
@@ -142,7 +143,12 @@ func (s *Service) runReview(ctx context.Context, p *store.Project, cfg store.App
 				"\n\nDecide whether to retry it or proceed and say which.", IsError: true}
 		}
 
-		history = append(history, model.Message{Role: model.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+		// Reasoning carries forward within the review as well. The reviewer now has a
+		// budget it can actually explore in, and across twenty turns of reading files
+		// the difference between keeping and discarding its chain of thought is the
+		// difference between a review and twenty first impressions.
+		history = append(history, model.Message{Role: model.RoleAssistant, Content: resp.Content,
+			ToolCalls: resp.ToolCalls, Reasoning: resp.Reasoning})
 
 		if len(resp.ToolCalls) == 0 {
 			return reviewResult(resp.Content)

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dootdotrun/doot-ai/internal/agent"
+	"github.com/dootdotrun/doot-ai/internal/model"
 	"github.com/dootdotrun/doot-ai/internal/store"
 )
 
@@ -37,12 +38,13 @@ type messageView struct {
 	HTML template.HTML
 
 	// Tool-result fields.
-	Tool    string
-	Diff    *diffView
-	Review  *reviewView
-	Ship    *shipView
-	Summary string
-	IsError bool
+	Tool     string
+	Diff     *diffView
+	Review   *reviewView
+	UIReview *uiReviewView
+	Ship     *shipView
+	Summary  string
+	IsError  bool
 }
 
 // shipView is the payoff of a finished task: what to look at now.
@@ -53,6 +55,18 @@ type shipView struct {
 }
 
 type reviewView struct {
+	Clean    bool
+	Findings template.HTML
+}
+
+// uiReviewView is the UI subagent's output.
+//
+// Distinct from reviewView because the two are not the same thing and reading them as
+// one would hide which check actually ran: a design brief is instructions to follow, a
+// verify pass is defects to fix, and a clean semantic review says nothing about
+// whether the screen looks right.
+type uiReviewView struct {
+	Design   bool
 	Clean    bool
 	Findings template.HTML
 }
@@ -90,6 +104,11 @@ type chatData struct {
 	Blocked       string
 	Model         string
 
+	// ContextTokens is how full the window was on the last model call. Rendered in
+	// the footer so "it feels like it is running out of room" becomes a number
+	// instead of a suspicion.
+	ContextTokens int
+
 	// Plan is the task board, rendered on this screen rather than its own.
 	//
 	// It used to be a separate tab, which meant the single most common interruption
@@ -112,16 +131,30 @@ type chatData struct {
 func sandboxBlockedMessage(status string) string {
 	switch status {
 	case store.SandboxProvisioning:
-		return "The sandbox is still being set up. I can talk, but tools that touch it will fail until it is ready."
+		return "Sandbox still being set up."
 	case store.SandboxSleeping:
-		return "The sandbox is asleep. Anything I run will wake it, which takes a moment."
+		return "Sandbox asleep — it will wake on the next command."
 	case store.SandboxError:
-		return "The sandbox failed to set up. Check the setup log in Settings, then recreate it there."
+		return "Sandbox setup failed. Recreate it in Settings."
 	case store.SandboxMissing:
-		return "The sandbox no longer exists. Recreate it in Settings."
+		return "Sandbox is gone. Recreate it in Settings."
 	default:
-		return "The sandbox is not ready. I can talk, but tools that touch it will fail."
+		return "Sandbox not ready."
 	}
+}
+
+// Context renders how full the window is, or "" before the first call.
+//
+// Rounded to whole percent and thousands, because the exact figure is noise: the
+// question this answers is "am I near the edge", and three significant figures invite
+// staring at a number that changes every turn.
+func (d chatData) Context() string {
+	if d.ContextTokens <= 0 {
+		return ""
+	}
+	pct := d.ContextTokens * 100 / model.ContextWindow
+	return fmt.Sprintf("%dk / %dk · %d%%",
+		d.ContextTokens/1000, model.ContextWindow/1000, pct)
 }
 
 func (d chatData) Busy() bool { return d.Run != nil && d.Run.State == store.RunRunning }
@@ -185,7 +218,7 @@ func (s *Server) chatView(r *http.Request) chatData {
 	p, err := s.projects.Active(r.Context())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		d.Blocked = "There is no project yet. Create one in Settings and I can start working in it."
+		d.Blocked = "No project yet — create one in Settings."
 	case err != nil:
 		s.log.Error("chat: load project", "error", err)
 		d.Blocked = "Could not load the project."
@@ -219,6 +252,12 @@ func (s *Server) chatView(r *http.Request) chatData {
 		}
 
 		d.Plan = s.loadPlan(r, p, d.Run)
+
+		if tokens, tokErr := s.store.ContextTokens(r.Context(), p.ID); tokErr == nil {
+			d.ContextTokens = tokens
+		} else {
+			s.log.Error("chat: context tokens", "error", tokErr)
+		}
 
 		msgs, err := s.store.TranscriptMessages(r.Context(), p.ID, transcriptLimit)
 		if err != nil {
@@ -397,6 +436,7 @@ func renderMessages(msgs []*store.Message) []messageView {
 			v.Summary, v.IsError = summariseToolResult(m)
 			v.Diff = extractDiff(m)
 			v.Review = extractReview(m)
+			v.UIReview = extractUIReview(m)
 			// Only a done result that actually shipped is treated as prose rather
 			// than as command output. It is the end of the task, and the markdown
 			// renderer has Linkify enabled, which makes the pull request URL
@@ -558,6 +598,25 @@ func extractReview(m *store.Message) *reviewView {
 	// Review findings are prose from the reviewer model, which writes them as a
 	// markdown list with file references in backticks.
 	return &reviewView{Clean: display.Clean, Findings: renderMarkdown(display.Findings)}
+}
+
+func extractUIReview(m *store.Message) *uiReviewView {
+	if m.MessageKind() != store.KindUIReview || !m.Display() {
+		return nil
+	}
+	var display struct {
+		Mode     string `json:"mode"`
+		Findings string `json:"findings"`
+		Clean    bool   `json:"clean"`
+	}
+	if json.Unmarshal(m.ToolDisplay, &display) != nil || display.Findings == "" {
+		return nil
+	}
+	return &uiReviewView{
+		Design:   display.Mode == "design",
+		Clean:    display.Clean,
+		Findings: renderMarkdown(display.Findings),
+	}
 }
 
 // clip keeps a compact one-line tool summary from consuming the transcript.

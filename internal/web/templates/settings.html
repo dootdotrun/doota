@@ -1,28 +1,33 @@
 {{define "content"}}
 
+{{/*
+  Everything on this screen is collapsed by default.
+
+  It used to render the whole configuration surface at once: three of the five
+  config groups could never collapse, and below them Sign-in, Session and the
+  entire Project section — create form, sandbox status, preview, and three
+  recovery buttons — were all permanently open. Arriving here to change one value
+  meant scrolling past all of it.
+
+  The exceptions are conditional and only appear when something is actually wrong
+  or missing, which is the one case where showing it unprompted is the point.
+*/}}
+
 {{if .Data.Missing}}
 <p class="banner banner-warn">
-  Missing: {{range $i, $m := .Data.Missing}}{{if $i}}, {{end}}<strong>{{$m}}</strong>{{end}}.
-  Paste them into Credentials below and save.
+  Not set: {{range $i, $m := .Data.Missing}}{{if $i}}, {{end}}<strong>{{$m}}</strong>{{end}}
 </p>
 {{end}}
 
 {{if .Data.PasswordChangeRequired}}
-<p class="banner banner-warn">
-  Still using the default <code>doot</code> / <code>doot</code> sign-in. Change it below.
-</p>
+<p class="banner banner-warn">Still on the default <code>doot</code> / <code>doot</code> sign-in.</p>
 {{end}}
 
 <form class="card stack" hx-post="{{app "/settings/config"}}" hx-target="#config-status" hx-swap="outerHTML">
   <input type="hidden" name="_config_form" value="1">
   {{range .Data.Groups}}
-    {{if .Collapsed}}
-    <details class="disclose group group-collapsed">
-      <summary>{{.Name}}</summary>
-    {{else}}
-    <fieldset class="group">
-      <legend>{{.Name}}</legend>
-    {{end}}
+    <details class="disclose group"{{if not .Collapsed}} open{{end}}>
+      <summary>{{.Name}}{{if .NeedsAttention}} <span class="pill pill-err">needs a value</span>{{end}}</summary>
       {{range .Fields}}
         <div class="field">
           {{if eq .Kind "bool"}}
@@ -62,17 +67,15 @@
                       hx-post="{{app "/settings/config/reset"}}"
                       hx-vals='{"key": "{{.Key}}"}'
                       hx-target="#config-status" hx-swap="outerHTML"
-                      hx-confirm="Replace this with the built-in default? Unsaved edits on this screen will be lost.">
+                      hx-confirm="Replace this with the built-in default?">
                 Reset to default
               </button>
-              {{if eq .Key "sandbox.setup_script"}}
-                <p class="help">
-                  The setup script only runs when a sandbox is created, so resetting
-                  it changes nothing about the sandbox you already have — recreate
-                  the sandbox below, or create the next project, for it to take
-                  effect.
-                </p>
-              {{end}}
+            {{else if eq .Kind "choice"}}
+              <select id="{{.Key}}" name="{{.Key}}">
+                {{range .Options}}
+                  <option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+                {{end}}
+              </select>
             {{else if eq .Kind "int"}}
               <input id="{{.Key}}" name="{{.Key}}" type="number" inputmode="numeric" value="{{.Value}}">
             {{else}}
@@ -83,85 +86,80 @@
           {{if .Help}}<p class="help">{{.Help}}</p>{{end}}
         </div>
       {{end}}
-    {{if .Collapsed}}</details>{{else}}</fieldset>{{end}}
+    </details>
   {{end}}
 
-  <p id="config-status" class="status-idle">Everything here is stored in the database. No redeploy.</p>
+  <p id="config-status" class="status-idle"></p>
   <button type="submit" class="btn btn-primary">Save</button>
 </form>
 
 {{if .Data.HasMemories}}
 {{/*
-  The agent's durable memory, which goes into the system prompt on every call.
-  Editable because it is written by the agent itself: a drifted line would
-  otherwise shape every future turn with no way to see it, let alone correct it.
+  The agent's two durable notes. Both go into the system prompt on every call, and
+  both are written by the agent itself — so a drifted line would otherwise shape
+  every future turn with no way to see it, let alone correct it.
 */}}
-<details class="disclose group group-collapsed">
+<details class="disclose group">
   <summary>Memories</summary>
   <form class="stack" method="post" action="{{app "/settings/memories"}}">
     <div class="field">
       <textarea id="memories" name="memories" rows="10" spellcheck="false"
-                placeholder="Empty. The agent writes here when you tell it something worth keeping.">{{.Data.Memories}}</textarea>
+                placeholder="Empty. Written when you tell it something worth keeping.">{{.Data.Memories}}</textarea>
     </div>
-    <button type="submit" class="btn">Save memories</button>
+    <button type="submit" class="btn">Save</button>
+  </form>
+</details>
+
+<details class="disclose group">
+  <summary>Orientation</summary>
+  <form class="stack" method="post" action="{{app "/settings/memories"}}">
+    <div class="field">
+      <textarea id="orientation" name="orientation" rows="14" spellcheck="false"
+                placeholder="Empty. Written the first time it reads the project.">{{.Data.Orientation}}</textarea>
+    </div>
+    <button type="submit" class="btn">Save</button>
   </form>
 </details>
 {{end}}
 
-<form class="card stack" method="post" action="{{app "/settings/credentials"}}">
-  <h2>Sign-in</h2>
+<details class="disclose group"{{if .Data.PasswordChangeRequired}} open{{end}}>
+  <summary>Sign-in</summary>
+  <form class="stack" method="post" action="{{app "/settings/credentials"}}">
+    <div class="field">
+      <label for="cred-username">Username</label>
+      <input id="cred-username" name="username" type="text" value="{{.Data.Username}}"
+             autocomplete="username" autocapitalize="none" autocorrect="off" required>
+    </div>
 
-  <div class="field">
-    <label for="cred-username">Username</label>
-    <input id="cred-username" name="username" type="text" value="{{.Data.Username}}"
-           autocomplete="username" autocapitalize="none" autocorrect="off" required>
-  </div>
+    <div class="field">
+      <label for="cred-password">New password</label>
+      <input id="cred-password" name="password" type="password" autocomplete="new-password">
+      <p class="help">Blank keeps the current one.</p>
+    </div>
 
-  <div class="field">
-    <label for="cred-password">New password</label>
-    <input id="cred-password" name="password" type="password" autocomplete="new-password">
-    <p class="help">Leave blank to keep the current one.</p>
-  </div>
+    <div class="field">
+      <label for="cred-confirm">Confirm</label>
+      <input id="cred-confirm" name="password_confirm" type="password" autocomplete="new-password">
+    </div>
 
-  <div class="field">
-    <label for="cred-confirm">Confirm new password</label>
-    <input id="cred-confirm" name="password_confirm" type="password" autocomplete="new-password">
-  </div>
+    <button type="submit" class="btn">Update sign-in</button>
+  </form>
 
-  <button type="submit" class="btn">Update sign-in</button>
-</form>
-
-<section class="card">
-  <div class="row">
-    <h2>Session</h2>
-    <span class="pill pill-idle">{{.Data.Provider}}</span>
-  </div>
-  <p class="muted">Sessions last {{.Data.SessionDays}} days and survive a deploy.</p>
-  <form method="post" action="{{app "/logout"}}">
+  <form method="post" action="{{app "/logout"}}" class="stack">
     <button type="submit" class="btn btn-danger">Sign out</button>
   </form>
-</section>
+  <p class="help">Sessions last {{.Data.SessionDays}} days.</p>
+</details>
 
 {{/*
-  The project, last. It used to be its own screen and its own tab, which was a
-  destination for something looked at roughly once per project: the repo it
-  cloned, the port it serves on, and three recovery buttons. Everything here is
-  either read once or pressed when something has already gone wrong, which is
-  what the bottom of Settings is for. The frequent actions from that screen —
-  preview and clear — are in the header now.
+  The project. Open only when there is not one yet, because until then it is the
+  only thing on this screen that can be done.
 */}}
-<h1 class="section-head">Project</h1>
-
 {{with .Data.Project}}
 {{if not .Project}}
 
-  <section class="card stack">
-    <h2>Create a project</h2>
-    <p class="muted">
-      A name and a repository URL. That provisions a sandbox, clones the repo, and
-      checks out the <code>doot</code> branch. There is no other setup step.
-    </p>
-
+  <details class="disclose group" open>
+    <summary>Create a project</summary>
     <form method="post" action="{{app "/project"}}" class="stack">
       <div class="field">
         <label for="name">Name</label>
@@ -175,28 +173,18 @@
         <input id="repo_url" name="repo_url" type="text" required
                autocapitalize="none" autocorrect="off" spellcheck="false"
                placeholder="https://github.com/you/thing.git">
-        <p class="help">
-          Public and private both work. The GitHub token above is installed in the
-          sandbox as a git credential, so clone, fetch, and push all use native git
-          over HTTPS. An SSH-style <code>git@github.com:owner/repo</code> URL is
-          rewritten to HTTPS.
-        </p>
+        <p class="help">Public or private. One project at a time.</p>
       </div>
 
       <button type="submit" class="btn btn-primary">Create project</button>
     </form>
-    <p class="help">
-      One project at a time, enforced by a unique index in Postgres rather than a
-      check in the UI. To work on something else, delete the current one first.
-    </p>
-  </section>
+  </details>
 
 {{else}}
 
-  <section class="card">
-    <div class="row">
-      <h2>{{.Project.Name}}</h2>
-    </div>
+  <details class="disclose group">
+    <summary>{{.Project.Name}}</summary>
+
     <dl class="facts">
       <dt>Repository</dt><dd class="wrap">{{.Project.RepoURL}}</dd>
       <dt>Default branch</dt><dd><code>{{.Project.DefaultBranch}}</code></dd>
@@ -208,63 +196,35 @@
         <span class="help">via {{.ProviderKind}}</span>
       </dd>
     </dl>
-  </section>
 
-  {{template "project_status.html" .}}
-
-  <section class="card stack">
-    <h2>Preview</h2>
-    <p class="muted">
-      Served from the root of this origin and proxied through the sandbox, so it is
-      behind your session — no secret URL and no provider token in the browser. Any
-      port works, and the previewed app's own absolute URLs resolve correctly
-      because it owns the root.
-    </p>
-    {{if .Preview}}
-      <a class="btn btn-primary" href="/" target="_blank" rel="noopener">
-        Open preview (port {{.Project.PreviewPort}})
-      </a>
-    {{else}}
-      <p class="help">Available once the sandbox is ready.</p>
-    {{end}}
+    {{template "project_status.html" .}}
 
     <form method="post" action="{{app "/project/preview-port"}}" class="inline-form">
-      <label for="preview_port">Port</label>
+      <label for="preview_port">Preview port</label>
       <input id="preview_port" name="preview_port" type="number" inputmode="numeric"
              value="{{.Project.PreviewPort}}" min="1" max="65535">
       <button type="submit" class="btn">Set</button>
     </form>
-    <p class="help">
-      Whatever port the dev server listens on. The agent sets this itself once it
-      starts one.
-    </p>
-  </section>
 
-  <section class="card stack danger">
-    <h2>Sandbox recovery</h2>
-    <p class="muted">In increasing order of destructiveness. Try them in that order.</p>
-
-    <form method="post" action="{{app "/project/wake"}}">
-      <button type="submit" class="btn">Wake</button>
+    <form method="post" action="{{app "/project/wake"}}" class="stack">
+      <button type="submit" class="btn">Wake sandbox</button>
     </form>
+  </details>
 
-    <form method="post" action="{{app "/project/recreate"}}">
+  <details class="disclose group danger">
+    <summary>Danger zone</summary>
+    <form method="post" action="{{app "/project/recreate"}}" class="stack">
       <button type="submit" class="btn btn-danger"
               data-hold="1200" data-hold-active="Hold to recreate…">Recreate sandbox</button>
+      <p class="help">Re-clones the repo. Uncommitted work is lost.</p>
     </form>
-    <p class="help">
-      Destroys the sandbox and provisions a new one, re-cloning the repo.
-      Uncommitted work is lost.
-    </p>
 
-    <form method="post" action="{{app "/project/delete"}}">
+    <form method="post" action="{{app "/project/delete"}}" class="stack">
       <button type="submit" class="btn btn-danger"
               data-hold="1600" data-hold-active="Hold to delete…">Delete project</button>
+      <p class="help">Destroys the sandbox so a new project can be created.</p>
     </form>
-    <p class="help">
-      Destroys the sandbox and clears the project, so a new one can be created.
-    </p>
-  </section>
+  </details>
 
 {{end}}
 {{end}}

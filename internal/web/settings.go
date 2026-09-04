@@ -12,9 +12,9 @@ import (
 
 const minPasswordLen = 6
 
-// maxMemoriesLen matches the cap the remember tool enforces on the agent, so the
-// operator cannot save something the agent would have been refused.
-const maxMemoriesLen = 8000
+// maxNotesLen matches the cap the remember and record_orientation tools enforce on
+// the agent, so the operator cannot save something the agent would have been refused.
+const maxNotesLen = 8000
 
 // clearSuffix names the companion checkbox that empties a stored secret.
 const clearSuffix = "__clear"
@@ -26,6 +26,7 @@ type settingsField struct {
 	Kind    string
 	Value   string
 	Checked bool
+	Options []settingsOption
 
 	// Secret fields render an empty input whatever is stored. IsSet is the only
 	// thing said about the stored value, and Placeholder says what submitting
@@ -45,15 +46,24 @@ func (f settingsField) Placeholder() string {
 // ClearKey names the checkbox that removes a stored secret.
 func (f settingsField) ClearKey() string { return f.Key + clearSuffix }
 
+// settingsOption is one entry of a KindChoice select.
+type settingsOption struct {
+	Value    string
+	Label    string
+	Selected bool
+}
+
 type settingsGroup struct {
 	Name   string
 	Fields []settingsField
 
-	// Collapsed starts the group closed. The system prompt and the setup script
-	// are each a screen tall and are edited once in a blue moon, so leaving them
-	// open buries the four fields anyone actually comes here for. Fields inside a
-	// closed <details> still submit with the form.
+	// Collapsed starts the group closed, which is the default for every group.
+	// Fields inside a closed <details> still submit with the form.
 	Collapsed bool
+
+	// NeedsAttention marks a group containing a required credential that is not set.
+	// It is the only thing that opens a group on arrival.
+	NeedsAttention bool
 }
 
 type settingsData struct {
@@ -72,6 +82,11 @@ type settingsData struct {
 	// wrong line therefore shaped every future turn invisibly and permanently.
 	Memories    string
 	HasMemories bool
+
+	// Orientation is what the agent worked out about the repository. Editable for the
+	// same reason memories are: the agent writes it, it shapes every turn, and a
+	// stale build command silently misdirects every future conversation.
+	Orientation string
 
 	// Project is the section at the bottom of the screen, which used to be a tab
 	// of its own. Always populated — with a zero value carrying only the provider
@@ -130,6 +145,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		} else if !errors.Is(memErr, store.ErrNotFound) {
 			s.log.Error("settings: load memories", "error", memErr)
 		}
+		if notes, notesErr := s.store.Orientation(r.Context(), pv.Project.ID); notesErr == nil {
+			d.Orientation = notes
+		} else if !errors.Is(notesErr, store.ErrNotFound) {
+			s.log.Error("settings: load orientation", "error", notesErr)
+		}
 	}
 
 	d.Groups = buildGroups(cfg)
@@ -149,27 +169,48 @@ func buildGroups(cfg store.AppConfig) []settingsGroup {
 			if f.Group != name {
 				continue
 			}
-			g.Fields = append(g.Fields, settingsField{
+			current := cfg.Display(f)
+			var options []settingsOption
+			for _, c := range f.Choices {
+				label := c
+				if c == "" {
+					// The blank option needs a name, or it renders as an empty row that
+					// looks like a rendering bug rather than a deliberate default.
+					label = "let the model decide"
+				}
+				options = append(options, settingsOption{Value: c, Label: label, Selected: c == current})
+			}
+
+			field := settingsField{
 				Key:     f.Key,
 				Label:   f.Label,
 				Help:    f.Help,
 				Kind:    string(f.Kind),
-				Value:   cfg.Display(f),
+				Value:   current,
 				Checked: f.Kind == store.KindBool && cfg.Bool(f.Key),
+				Options: options,
 				Secret:  f.Secret(),
 				IsSet:   cfg.IsSet(f.Key),
-			})
+			}
+			if !field.IsSet && store.RequiredCredential(f.Key) {
+				g.NeedsAttention = true
+			}
+			g.Fields = append(g.Fields, field)
 		}
 		if len(g.Fields) > 0 {
-			// A group is collapsed when everything in it is a full-height textarea,
-			// which is the same thing as "this is the long, rarely-touched stuff".
-			g.Collapsed = true
-			for _, f := range g.Fields {
-				if f.Kind != string(store.KindTextarea) {
-					g.Collapsed = false
-					break
-				}
-			}
+			// Everything starts closed, so opening a group is something the operator
+			// chose to do.
+			//
+			// The rule used to be "collapsed when every field is a textarea", which
+			// meant Credentials, Model and Git could never collapse — three of the five
+			// groups, plus four more sections below them, all open at once. Arriving at
+			// Settings to change one value meant reading the entire configuration
+			// surface of the application.
+			//
+			// The single exception is a group holding a credential that is missing,
+			// because the banner at the top of the screen sends the operator here to
+			// fill it in and hiding it behind a click would be a dead end.
+			g.Collapsed = !g.NeedsAttention
 			groups = append(groups, g)
 		}
 	}
@@ -352,20 +393,41 @@ func (s *Server) handleSaveMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	memories := r.PostFormValue("memories")
-	if len(memories) > maxMemoriesLen {
-		s.redirectSettings(w, r, fmt.Sprintf("Memories must be under %d characters.", maxMemoriesLen))
+	// One handler for both durable notes, because the form posts whichever it owns
+	// and the validation and failure modes are identical.
+	if raw, present := r.PostForm["memories"]; present {
+		memories := raw[0]
+		if len(memories) > maxNotesLen {
+			s.redirectSettings(w, r, fmt.Sprintf("Memories must be under %d characters.", maxNotesLen))
+			return
+		}
+		if err := s.store.SetMemories(r.Context(), p.ID, memories); err != nil {
+			s.log.Error("save memories", "error", err)
+			s.redirectSettings(w, r, "Could not save memories.")
+			return
+		}
+		s.log.Info("memories edited by the operator", "chars", len(strings.TrimSpace(memories)))
+		s.redirectSettings(w, r, "Memories saved.")
 		return
 	}
 
-	if err := s.store.SetMemories(r.Context(), p.ID, memories); err != nil {
-		s.log.Error("save memories", "error", err)
-		s.redirectSettings(w, r, "Could not save memories.")
+	if raw, present := r.PostForm["orientation"]; present {
+		notes := raw[0]
+		if len(notes) > maxNotesLen {
+			s.redirectSettings(w, r, fmt.Sprintf("Orientation must be under %d characters.", maxNotesLen))
+			return
+		}
+		if err := s.store.SetOrientation(r.Context(), p.ID, notes); err != nil {
+			s.log.Error("save orientation", "error", err)
+			s.redirectSettings(w, r, "Could not save orientation.")
+			return
+		}
+		s.log.Info("orientation edited by the operator", "chars", len(strings.TrimSpace(notes)))
+		s.redirectSettings(w, r, "Orientation saved.")
 		return
 	}
 
-	s.log.Info("memories edited by the operator", "chars", len(strings.TrimSpace(memories)))
-	s.redirectSettings(w, r, "Memories saved.")
+	s.redirectSettings(w, r, "Nothing to save.")
 }
 
 func (s *Server) redirectSettings(w http.ResponseWriter, r *http.Request, notice string) {

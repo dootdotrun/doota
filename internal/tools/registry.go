@@ -99,13 +99,18 @@ func writeTools() []Tool {
 }
 
 // controlTools drive the loop itself rather than the sandbox.
+//
+// record_orientation is here rather than among the write tools because what it
+// changes is the agent's own durable context, not the sandbox.
 func controlTools() []Tool {
 	return []Tool{
 		createPlanTool{},
 		updateTaskTool{},
 		reviewTool{},
+		uiReviewTool{},
 		askHumanTool{},
 		rememberTool{},
+		orientTool{},
 		doneTool{},
 	}
 }
@@ -120,6 +125,20 @@ func Primary() *Registry {
 // Reviewer is the registry the reviewer subagent gets: read-only, no exceptions.
 func Reviewer() *Registry {
 	return NewRegistry(readOnly()...)
+}
+
+// UIReviewer is the registry the UI subagent gets.
+//
+// Read-only plus a camera. It can look at the code and it can look at the rendered
+// page, and it cannot change either — the same reason the semantic reviewer cannot
+// fix what it finds: a reviewer that edits the thing it is reviewing produces
+// findings nobody can check.
+//
+// screenshot is deliberately not in Primary. A tool result on this transport is a
+// string, so the primary agent could take a picture and would then have no way to see
+// it; the only honest use of a camera is by an agent that builds its own requests.
+func UIReviewer() *Registry {
+	return NewRegistry(append(readOnly(), screenshotTool{})...)
 }
 
 // Shipping holds the tools the runner may call but the model may not.

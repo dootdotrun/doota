@@ -87,14 +87,15 @@ func (w *worker) cancelAll() {
 
 // Service runs the loop.
 type Service struct {
-	store    *store.Store
-	projects *project.Service
-	model    *model.Client
-	tools    *tools.Registry
-	reviewer *tools.Registry
-	shipping *tools.Registry
-	hub      *events.Hub
-	log      *slog.Logger
+	store      *store.Store
+	projects   *project.Service
+	model      *model.Client
+	tools      *tools.Registry
+	reviewer   *tools.Registry
+	uiReviewer *tools.Registry
+	shipping   *tools.Registry
+	hub        *events.Hub
+	log        *slog.Logger
 
 	mu      sync.Mutex
 	workers map[string]*worker // keyed by run id
@@ -102,9 +103,10 @@ type Service struct {
 }
 
 func New(st *store.Store, projects *project.Service, client *model.Client,
-	registry, reviewer *tools.Registry, hub *events.Hub, log *slog.Logger) *Service {
+	registry, reviewer, uiReviewer *tools.Registry, hub *events.Hub, log *slog.Logger) *Service {
 	return &Service{
-		store: st, projects: projects, model: client, tools: registry, reviewer: reviewer,
+		store: st, projects: projects, model: client, tools: registry,
+		reviewer: reviewer, uiReviewer: uiReviewer,
 		shipping: tools.Shipping(),
 		hub:      hub, log: log,
 		workers: map[string]*worker{},
@@ -295,6 +297,7 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		APIKey: cfg.Secret(store.KeyModelAPIKey), BaseURL: cfg.Text(store.KeyModelBaseURL),
 		Model: cfg.Text(store.KeyModelName), System: system, Messages: toModelMessages(history),
 		Tools: toolSpecs(s.tools), MaxTokens: cfg.Int("model.max_output_tokens"),
+		ReasoningEffort: cfg.Text(store.KeyReasoningEffort),
 	}
 
 	s.setState(ctx, r.ProjectID, r.ID, StateThinking, fmt.Sprintf("step %d", r.StepCount+1))
@@ -319,7 +322,9 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		// Persist whatever arrived so a stream that dies late does not lose work.
 		if strings.TrimSpace(resp.Content) != "" {
 			msg, appendErr := s.store.AppendMessage(ctx, store.NewMessage{ProjectID: r.ProjectID, RunID: r.ID,
-				Role: model.RoleAssistant, Content: resp.Content, TokenCount: resp.Usage.CompletionTokens, Interrupted: true})
+				Role: model.RoleAssistant, Content: resp.Content, TokenCount: resp.Usage.CompletionTokens,
+				PromptTokens: resp.Usage.PromptTokens, ReasoningTokens: resp.Usage.ReasoningTokens,
+				ReasoningItems: encodeReasoning(resp.Reasoning), Interrupted: true})
 			if appendErr != nil {
 				return false, appendErr
 			}
@@ -341,7 +346,9 @@ func (s *Service) advance(ctx context.Context, r *store.Run, w *worker) (bool, e
 		}
 	}
 	assistant, err = s.store.AppendMessage(ctx, store.NewMessage{ProjectID: r.ProjectID, RunID: r.ID,
-		Role: model.RoleAssistant, Content: resp.Content, ToolCalls: encoded, TokenCount: resp.Usage.CompletionTokens})
+		Role: model.RoleAssistant, Content: resp.Content, ToolCalls: encoded,
+		TokenCount: resp.Usage.CompletionTokens, PromptTokens: resp.Usage.PromptTokens,
+		ReasoningTokens: resp.Usage.ReasoningTokens, ReasoningItems: encodeReasoning(resp.Reasoning)})
 	if err != nil {
 		return false, err
 	}
@@ -421,13 +428,20 @@ func (s *Service) executeCalls(ctx context.Context, r *store.Run, p *store.Proje
 			}
 		}
 
-		// review is executed by the runner because it needs the model client.
+		// The reviewers are executed by the runner because they need the model client.
 		if !result.IsError && call.Name == "review" {
 			request, ok := result.Display.(tools.ReviewRequest)
 			if !ok {
 				return fmt.Errorf("review returned an invalid request")
 			}
 			result = s.runReview(ctx, p, cfg, sb, r.ID, assistant.ID, pad, request)
+		}
+		if !result.IsError && call.Name == "ui_review" {
+			request, ok := result.Display.(tools.UIReviewRequest)
+			if !ok {
+				return fmt.Errorf("ui_review returned an invalid request")
+			}
+			result = s.runUIReview(ctx, p, cfg, sb, r.ID, assistant.ID, pad, request)
 		}
 
 		var display json.RawMessage
@@ -440,6 +454,8 @@ func (s *Service) executeCalls(ctx context.Context, r *store.Run, p *store.Proje
 			kind = store.KindAskHuman
 		case "review":
 			kind = store.KindReview
+		case "ui_review":
+			kind = store.KindUIReview
 		}
 		in := store.NewMessage{ProjectID: p.ID, RunID: r.ID, Role: model.RoleTool, Kind: kind,
 			Content: result.Content, ToolCallID: call.ID, ToolName: call.Name, ToolDisplay: display}
@@ -490,7 +506,11 @@ func (s *Service) applyControl(ctx context.Context, p *store.Project, r *store.R
 		if !ok {
 			return nil, nil, fmt.Errorf("create_plan returned an invalid plan")
 		}
-		pad, awaiting, msg, err := s.store.WritePlan(ctx, p.ID, r.ID, request.Title, request.Tasks, in)
+		draft := store.PlanDraft{Title: request.Title, Tasks: request.Tasks, Spec: store.Spec{
+			Problem: request.Problem, Approach: request.Approach, Verification: request.Verification,
+			EdgeCases: request.EdgeCases, Risks: request.Risks, Questions: request.Questions,
+		}}
+		pad, awaiting, msg, err := s.store.WritePlan(ctx, p.ID, r.ID, draft, in)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -517,6 +537,17 @@ func (s *Service) applyControl(ctx context.Context, p *store.Project, r *store.R
 			return nil, nil, fmt.Errorf("remember returned an invalid update")
 		}
 		if err := s.store.SetMemories(ctx, p.ID, request.Memories); err != nil {
+			return nil, nil, err
+		}
+		msg, err := s.store.AppendMessage(ctx, in)
+		return msg, nil, err
+
+	case "record_orientation":
+		request, ok := result.Display.(tools.OrientationUpdate)
+		if !ok {
+			return nil, nil, fmt.Errorf("record_orientation returned an invalid update")
+		}
+		if err := s.store.SetOrientation(ctx, p.ID, request.Orientation); err != nil {
 			return nil, nil, err
 		}
 		msg, err := s.store.AppendMessage(ctx, in)
@@ -566,20 +597,76 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 		return msg, nil, appendErr
 	}
 
-	// One nudge if the work was never reviewed. Asking in the prompt was not
-	// enough: on a real run the model went straight from its last subtask to
-	// shipping. This checks that a review was attempted, not that it passed, so a
-	// failing reviewer cannot trap the run here.
-	reviewed, err := s.store.ReviewAttempted(ctx, r.ID)
+	// The work has to have been reviewed, and the review has to have reached a
+	// verdict.
+	//
+	// This used to check only that a review had been attempted, which was safe while
+	// attempting one implied getting one. It did not: the reviewer's budget was five
+	// model calls and running out was its ordinary outcome, so a run could ship with
+	// a review in the log and nobody having formed an opinion. The reviewer can
+	// finish now, so this can ask for what it actually wants.
+	//
+	// It still cannot trap the run. A reviewer that is genuinely broken — no diff, a
+	// dead stream — fails the same way every time, so after two attempts the agent is
+	// allowed through on the condition that it says the review was inconclusive.
+	// Blocking forever on a component the operator cannot repair from here would be
+	// worse than shipping with a stated caveat.
+	attempts, concluded, err := s.store.ReviewOutcomes(ctx, r.ID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !reviewed {
+	switch {
+	case attempts == 0:
 		msg, appendErr := s.store.AppendMessage(ctx, in(
 			"Before shipping, call review so an independent reviewer reads the diff. "+
 				"Deal with anything real it finds, then call done again.",
 			map[string]any{"summary": request.Summary}))
 		return msg, nil, appendErr
+	case !concluded && attempts < 2:
+		msg, appendErr := s.store.AppendMessage(ctx, in(
+			"The review did not reach a verdict, so nothing has actually been reviewed yet. "+
+				"Call review again. If it fails the same way a second time, say so in your summary "+
+				"and call done — but do not describe this work as reviewed.",
+			map[string]any{"summary": request.Summary}))
+		return msg, nil, appendErr
+	}
+
+	// A change to the interface needs someone who can see it.
+	//
+	// Gated on the diff actually touching UI files, because most changes do not and a
+	// blanket requirement would be a tax on every backend fix. The agent's own prompt
+	// admits it cannot see rendered pixels, so for the changes where that matters this
+	// is the only check in the system that can catch a button off the edge of a phone
+	// screen — which is exactly the work that was being handed back to the operator to
+	// notice.
+	//
+	// Non-trapping on the same terms as the review above.
+	if touched, files, uiErr := s.uiTouched(ctx, env); uiErr == nil && touched {
+		uiAttempts, uiConcluded, err := s.store.UIReviewOutcomes(ctx, r.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		switch {
+		case uiAttempts == 0:
+			msg, appendErr := s.store.AppendMessage(ctx, in(
+				"This change touches the interface ("+files+"), and you cannot see rendered pixels. "+
+					"Start the app with bash_bg and call ui_review with mode \"verify\" and its URL, so a "+
+					"reviewer that can see it checks the phone and desktop layouts. Fix what it finds, "+
+					"then call done again.",
+				map[string]any{"summary": request.Summary}))
+			return msg, nil, appendErr
+		case !uiConcluded && uiAttempts < 2:
+			msg, appendErr := s.store.AppendMessage(ctx, in(
+				"The UI review did not reach a verdict, so the interface has not actually been looked at. "+
+					"Call ui_review again. If it fails the same way twice, say so in your summary and "+
+					"call done — but do not describe the UI as checked.",
+				map[string]any{"summary": request.Summary}))
+			return msg, nil, appendErr
+		}
+	} else if uiErr != nil {
+		// Not fatal. Failing to classify the diff should not block shipping; it just
+		// means this particular guard did not fire.
+		s.log.Error("classify diff for ui review", "run_id", r.ID, "error", uiErr)
 	}
 
 	pushArgs, _ := json.Marshal(map[string]bool{"force_with_lease": false})
@@ -635,6 +722,66 @@ func (s *Service) ship(ctx context.Context, p *store.Project, r *store.Run, call
 	// is deferred for as long as the composer holds text or focus.
 	s.setState(ctx, r.ProjectID, r.ID, StateDone, "shipped")
 	return msg, finished, nil
+}
+
+// uiExtensions are the file types whose changes can look wrong without being wrong.
+//
+// Templates, stylesheets, and component files. Deliberately not every file a
+// front-end project contains: a change to a JSON fixture or a lockfile cannot move a
+// button, and requiring a visual review for it would make the guard something to
+// resent rather than something to trust.
+var uiExtensions = map[string]bool{
+	".css": true, ".scss": true, ".sass": true, ".less": true,
+	".html": true, ".htm": true, ".gohtml": true, ".tmpl": true, ".hbs": true, ".ejs": true,
+	".jsx": true, ".tsx": true, ".vue": true, ".svelte": true, ".astro": true,
+}
+
+// uiTouched reports whether the work so far changed anything that renders, and names
+// a couple of examples for the message.
+func (s *Service) uiTouched(ctx context.Context, env *tools.Env) (bool, string, error) {
+	args, err := json.Marshal(map[string]any{"stat": true})
+	if err != nil {
+		return false, "", err
+	}
+	// git_diff --stat with no explicit range, so it defaults to env.BaseCommit — the
+	// commit the plan was approved at — and falls back to uncommitted work when there
+	// is no plan. It already resolves all of that, and it is already logged.
+	res, err := s.reviewer.Execute(ctx, "git_diff", args, env)
+	if err != nil {
+		return false, "", err
+	}
+	if res.IsError {
+		return false, "", fmt.Errorf("git diff --stat: %s", res.Content)
+	}
+
+	var hits []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(res.Content, "\n") {
+		// A --stat line is "path | 3 +--". Anything without the separator is the
+		// summary line or a truncation notice.
+		path, _, found := strings.Cut(line, "|")
+		if !found {
+			continue
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if i := strings.LastIndexByte(path, '.'); i >= 0 {
+			if uiExtensions[strings.ToLower(path[i:])] && !seen[path] {
+				seen[path] = true
+				hits = append(hits, path)
+			}
+		}
+	}
+	if len(hits) == 0 {
+		return false, "", nil
+	}
+	names := hits
+	if len(names) > 3 {
+		names = append(names[:3:3], fmt.Sprintf("and %d more", len(hits)-3))
+	}
+	return true, strings.Join(names, ", "), nil
 }
 
 // streamWithRetry retries only calls that produce no model output. Once text or a
@@ -830,12 +977,39 @@ func (s *Service) publishLive(eventType string, payload any) {
 	}
 }
 
+// encodeReasoning prepares reasoning items for storage.
+//
+// nil for a turn that produced none, so the column stays NULL rather than holding an
+// empty array — the difference between "this model does not return reasoning" and
+// "this turn happened not to have any" is worth being able to see in the database.
+func encodeReasoning(items []model.ReasoningItem) json.RawMessage {
+	if len(items) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// toModelMessages rebuilds the model's view of the conversation from the transcript.
+//
+// The reasoning items go back in here. That is the entire payoff of the Responses
+// API migration: without this the model re-derives its chain of thought on every
+// turn of a tool loop, spending the output budget on work it already did and losing
+// the thread of anything that takes more than one step.
 func toModelMessages(rows []*store.Message) []model.Message {
 	out := make([]model.Message, 0, len(rows))
 	for _, m := range rows {
 		msg := model.Message{Role: m.Role, Content: m.Content, ToolCallID: m.CallID()}
 		if m.HasToolCalls() {
 			_ = json.Unmarshal(m.ToolCalls, &msg.ToolCalls)
+		}
+		if m.HasReasoning() {
+			// A decode failure drops the reasoning rather than failing the turn: losing
+			// continuity costs quality, and refusing to build the request costs the run.
+			_ = json.Unmarshal(m.ReasoningItems, &msg.Reasoning)
 		}
 		out = append(out, msg)
 	}
